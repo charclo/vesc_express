@@ -21,8 +21,23 @@
 #define MAIN_HWCONF_HW_H_
 
 #include "conf_general.h"
+#include "adc.h"
 
 #include HW_HEADER
+
+#ifdef OVR_CONF_DEFAULT
+#include OVR_CONF_DEFAULT
+#else
+#include "conf_default.h"
+#endif
+
+#ifndef HW_DEFAULT_ID
+#define HW_DEFAULT_ID				2
+#endif
+
+#ifndef FW_NAME
+#define FW_NAME ""
+#endif
 
 #ifndef LED_RED_ON
 #define LED_RED_ON()
@@ -36,6 +51,39 @@
 
 #ifndef HW_INIT_HOOK
 #define HW_INIT_HOOK()
+#endif
+
+#ifndef HW_POST_LISPIF_HOOK
+#define HW_POST_LISPIF_HOOK()
+#endif
+
+#ifndef LOGS_ENABLED
+// Should contain 0 or 1
+#define LOGS_ENABLED 0
+#endif
+
+#ifndef UART_NUM
+#define HW_NO_UART
+#define UART_NUM					0
+#define UART_BAUDRATE				115200
+#define UART_TX						21
+#define UART_RX						20
+#endif
+
+#ifndef HW_ADC_CH0
+#define HW_ADC_CH0					ADC1_CHANNEL_0
+#endif
+#ifndef HW_ADC_CH1
+#define HW_ADC_CH1					ADC1_CHANNEL_1
+#endif
+#ifndef HW_ADC_CH2
+#define HW_ADC_CH2					ADC1_CHANNEL_2
+#endif
+#ifndef HW_ADC_CH3
+#define HW_ADC_CH3					ADC1_CHANNEL_3
+#endif
+#ifndef HW_ADC_CH4
+#define HW_ADC_CH4					ADC1_CHANNEL_4
 #endif
 
 #endif /* MAIN_HWCONF_HW_H_ */

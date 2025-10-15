@@ -1,5 +1,6 @@
 /*
-	Copyright 2022 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2022 Benjamin Vedder      benjamin@vedder.se
+	Copyright 2023 Rasmus Söderhielm    rasmus.soderhielm@gmail.com
 
 	This file is part of the VESC firmware.
 
@@ -21,11 +22,66 @@
 #define MAIN_H_
 
 #include "datatypes.h"
+#include "hw.h"
+
+#ifndef OVR_CONF_MAIN_CONFIG
+typedef struct {
+	int controller_id;
+	CAN_BAUD can_baud_rate;
+	int can_status_rate_hz;
+	WIFI_MODE wifi_mode;
+	char wifi_sta_ssid[36];
+	char wifi_sta_key[26];
+	char wifi_ap_ssid[36];
+	char wifi_ap_key[26];
+	bool use_tcp_local;
+	bool use_tcp_hub;
+	char tcp_hub_url[36];
+	uint16_t tcp_hub_port;
+	char tcp_hub_id[26];
+	char tcp_hub_pass[26];
+	BLE_MODE ble_mode;
+	char ble_name[9];
+	uint32_t ble_pin;
+	uint32_t ble_service_capacity;
+	uint32_t ble_chr_descr_capacity;
+} main_config_t;
+#endif
+
+// Init codes for the persistent storage. Change the config code when updating the config struct
+// in a way that is not backwards compatible.
+#ifndef VAR_INIT_CODE
+#define VAR_INIT_CODE			259763459
+#endif
+
+// Backup data that is retained between boots and firmware updates. When adding new
+// entries, put them at the end.
+typedef struct {
+	// Store CAN-related settings separate from config as well. This is done in order
+	// to retain the CAN-settings after doing distributed firmware updates that change
+	// the main config signature.
+	uint32_t controller_id_init_flag;
+	uint16_t controller_id;
+	uint32_t can_baud_rate_init_flag;
+	CAN_BAUD can_baud_rate;
+
+	// Main configuration structure
+	uint32_t config_init_flag;
+	main_config_t config;
+
+	// Pad just in case as flash_helper_write_data rounds length down to
+	// closest multiple of 8.
+	volatile uint32_t pad1;
+	volatile uint32_t pad2;
+} backup_data;
 
 // Global variables
 extern volatile backup_data backup;
 
 // Functions
+uint32_t main_calc_hw_crc(void);
 void main_store_backup_data(void);
+bool main_init_done(void);
+void main_wait_until_init_done(void);
 
 #endif /* MAIN_H_ */

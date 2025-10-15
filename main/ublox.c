@@ -28,14 +28,11 @@
 #include <math.h>
 
 // Settings
-#if UBLOX_IS_F9P
-#define BAUDRATE_UBX_DEFAULT		38400	// see UBX-18010854
-#else
 #define BAUDRATE_UBX_DEFAULT		9600
-#endif
+#define BAUDRATE_UBX_DEFAULT_NEW	38400
 #define BAUDRATE					115200
 #define LINE_BUFFER_SIZE			256
-#define UBX_BUFFER_SIZE				3000
+#define UBX_BUFFER_SIZE				2000
 #define CFG_ACK_WAIT_MS				100
 
 // For double precision literals
@@ -66,6 +63,11 @@ static bool m_print_next_cfg_gnss = false;
 static decoder_state m_decoder_state;
 static SemaphoreHandle_t wait_sem;
 static volatile bool wait_was_ack;
+static volatile bool m_init_ok = false;
+static volatile bool sem_init_done = false;
+static volatile bool should_terminate = true;
+static volatile bool thd_rx_is_running = false;
+static volatile int m_uart_num = 0;
 
 // Private functions
 static void proc_byte(uint8_t ch);
@@ -123,15 +125,29 @@ static void(*rx_gnss)(ubx_cfg_gnss *gnss) = 0;
 static void rx_task(void *arg) {
 	reset_decoder_state();
 
-	for (;;) {
-		uint8_t buf[1];
-		uart_read_bytes(UART_NUM, buf, 1, portMAX_DELAY);
-		proc_byte(buf[0]);
+	while (!should_terminate) {
+		if (!uart_is_driver_installed(m_uart_num)) {
+			break;
+		}
+
+		uint8_t c;
+		int res = uart_read_bytes(m_uart_num, &c, 1, 10);
+		if (res == 1) {
+			proc_byte(c);
+		}
 	}
+
+	thd_rx_is_running = false;
+	vTaskDelete(NULL);
 }
 
-bool ublox_init(bool print) {
-	wait_sem = xSemaphoreCreateBinary();
+bool ublox_init(bool print, uint16_t rate_ms, int num_uart, int pin_rx, int pin_tx) {
+	m_init_ok = false;
+
+	if (!sem_init_done) {
+		wait_sem = xSemaphoreCreateBinary();
+		sem_init_done = true;
+	}
 
 	uart_config_t uart_config = {
 			.baud_rate = BAUDRATE,
@@ -142,11 +158,24 @@ bool ublox_init(bool print) {
 			.source_clk = UART_SCLK_DEFAULT,
 	};
 
-	uart_driver_install(UART_NUM, 1024, 512, 0, 0, 0);
-	uart_param_config(UART_NUM, &uart_config);
-	uart_set_pin(UART_NUM, UART_TX, UART_RX, -1, -1);
+	should_terminate = true;
+	while (thd_rx_is_running) {
+		vTaskDelay(1);
+	}
 
-	xTaskCreatePinnedToCore(rx_task, "ublox_rx", 4096, NULL, 8, NULL, tskNO_AFFINITY);
+	m_uart_num = num_uart;
+
+	if (uart_is_driver_installed(m_uart_num)) {
+		uart_driver_delete(m_uart_num);
+	}
+
+	uart_driver_install(m_uart_num, 512, 512, 0, 0, 0);
+	uart_param_config(m_uart_num, &uart_config);
+	uart_set_pin(m_uart_num, pin_tx, pin_rx, -1, -1);
+
+	should_terminate = false;
+	thd_rx_is_running = true;
+	xTaskCreatePinnedToCore(rx_task, "ublox_rx", 3072, NULL, 8, NULL, tskNO_AFFINITY);
 
 	// Prevent unused warnings
 	(void)ubx_get_U1;
@@ -183,16 +212,21 @@ bool ublox_init(bool print) {
 	uart.out_nmea = true;
 	uart.out_rtcm3 = false;
 
-	uint16_t ubx_rate = 500;
-
-	// Up to 5 retries
 	bool baud_ok = false;
-	for (int i = 0;i < 5;i++) {
+	bool is_m10 = false;
+
+	// Up to 4 retries
+	for (int i = 0;i < 4;i++) {
+		if (!thd_rx_is_running) {
+			return false;
+		}
+
 		// Make sure that the baudrate is correct on unconfigured UBX.
-		if (ublox_cfg_rate(ubx_rate, 1, 0) == -1) {
+		if (ublox_cfg_rate(rate_ms, 1, 0) == -1) {
 			// Set default baudrate
 			uart_config.baud_rate = BAUDRATE_UBX_DEFAULT;
-			uart_param_config(UART_NUM, &uart_config);
+
+			uart_param_config(m_uart_num, &uart_config);
 
 			vTaskDelay(100 / portTICK_PERIOD_MS);
 			reset_decoder_state();
@@ -204,12 +238,12 @@ bool ublox_init(bool print) {
 
 			// Set configured baudrate
 			uart_config.baud_rate = BAUDRATE;
-			uart_param_config(UART_NUM, &uart_config);
+			uart_param_config(m_uart_num, &uart_config);
 
 			vTaskDelay(100 / portTICK_PERIOD_MS);
 			reset_decoder_state();
 
-			if (ublox_cfg_rate(ubx_rate, 1, 0) != -1) {
+			if (ublox_cfg_rate(rate_ms, 1, 0) != -1) {
 				baud_ok = true;
 				break;
 			}
@@ -217,7 +251,7 @@ bool ublox_init(bool print) {
 			vTaskDelay(100 / portTICK_PERIOD_MS);
 			reset_decoder_state();
 
-			if (ublox_cfg_rate(ubx_rate, 1, 0) != -1) {
+			if (ublox_cfg_rate(rate_ms, 1, 0) != -1) {
 				baud_ok = true;
 				break;
 			}
@@ -230,89 +264,175 @@ bool ublox_init(bool print) {
 	}
 
 	if (!baud_ok) {
+		unsigned char buffer_baud[80];
+		int ind = 0;
+		ublox_cfg_append_uart1_baud(buffer_baud, &ind, BAUDRATE);
+		ublox_cfg_append_rate(buffer_baud, &ind, rate_ms, 1);
+
+		for (int i = 0;i < 4;i++) {
+			if (!thd_rx_is_running) {
+				return false;
+			}
+
+			// Make sure that the baudrate is correct on unconfigured UBX.
+			if (ublox_cfg_valset(buffer_baud, ind, BAUDRATE, true, true) == -1) {
+				// Set default baudrate
+				uart_config.baud_rate = BAUDRATE_UBX_DEFAULT_NEW;
+				uart_param_config(m_uart_num, &uart_config);
+
+				vTaskDelay(100 / portTICK_PERIOD_MS);
+				reset_decoder_state();
+				ublox_cfg_valset(buffer_baud, ind, BAUDRATE, true, true);
+
+				vTaskDelay(100 / portTICK_PERIOD_MS);
+				reset_decoder_state();
+				ublox_cfg_valset(buffer_baud, ind, BAUDRATE, true, true);
+
+				// Set configured baudrate
+				uart_config.baud_rate = BAUDRATE;
+				uart_param_config(m_uart_num, &uart_config);
+
+				vTaskDelay(100 / portTICK_PERIOD_MS);
+				reset_decoder_state();
+
+				if (ublox_cfg_valset(buffer_baud, ind, BAUDRATE, true, true) != -1) {
+					baud_ok = true;
+					break;
+				}
+
+				vTaskDelay(100 / portTICK_PERIOD_MS);
+				reset_decoder_state();
+
+				if (ublox_cfg_valset(buffer_baud, ind, BAUDRATE, true, true) != -1) {
+					baud_ok = true;
+					break;
+				}
+			} else {
+				baud_ok = true;
+				break;
+			}
+
+			vTaskDelay(500 / portTICK_PERIOD_MS);
+		}
+
+		if (baud_ok) {
+			is_m10 = true;
+		}
+	}
+
+	if (!baud_ok) {
+		should_terminate = true;
+		while (thd_rx_is_running) {
+			vTaskDelay(1);
+		}
+
 		if (print) {
 			commands_printf("Could not set baud rate");
 		}
 		return false;
 	}
 
-	ublox_cfg_prt_uart(&uart);
-	ublox_cfg_rate(ubx_rate, 1, 0);
+	if (!is_m10) {
+		if (!thd_rx_is_running) {
+			return false;
+		}
 
-	// Dynamic model
-	ubx_cfg_nav5 nav5;
-	memset(&nav5, 0, sizeof(ubx_cfg_nav5));
-	nav5.apply_dyn = true;
-	nav5.dyn_model = 4;
-	ublox_cfg_nav5(&nav5);
+		ublox_cfg_prt_uart(&uart);
+		ublox_cfg_rate(rate_ms, 1, 0);
 
-	ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SOL, 0);
-	ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_RELPOSNED, 0);
-	ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SVIN, 0);
-	ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SAT, 0);
+		// Dynamic model
+		ubx_cfg_nav5 nav5;
+		memset(&nav5, 0, sizeof(ubx_cfg_nav5));
+		nav5.apply_dyn = true;
+		nav5.dyn_model = 4;
+		ublox_cfg_nav5(&nav5);
 
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GGA, 1);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GSV, 1);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_RMC, 1);
+		ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SOL, 0);
+		ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_RELPOSNED, 0);
+		ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SVIN, 0);
+		ublox_cfg_msg(UBX_CLASS_NAV, UBX_NAV_SAT, 0);
 
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GLL, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GSA, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_VTG, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GRS, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GST, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_ZDA, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GBS, 0);
-	ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_DTM, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GGA, 1);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GSV, 1);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_RMC, 1);
 
-	ubx_cfg_nmea nmea;
-	memset(&nmea, 0, sizeof(ubx_cfg_nmea));
-	nmea.nmeaVersion = 0x41;
-	nmea.numSv = 0;
-//	nmea.highPrec = true;
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GLL, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GSA, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_VTG, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GRS, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GST, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_ZDA, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_GBS, 0);
+		ublox_cfg_msg(UBX_CLASS_NMEA, UBX_NMEA_DTM, 0);
 
-	ublox_cfg_nmea(&nmea);
+		ubx_cfg_nmea nmea;
+		memset(&nmea, 0, sizeof(ubx_cfg_nmea));
+		nmea.nmeaVersion = 0x41;
+		nmea.numSv = 0;
+		//	nmea.highPrec = true;
 
-#if UBLOX_IS_F9P
-	unsigned char buffer[80];
-	int ind = 0;
-	ublox_cfg_append_enable_gps(buffer, &ind, true, true, true);
-	ublox_cfg_append_enable_gal(buffer, &ind, true, true, true);
-	ublox_cfg_append_enable_bds(buffer, &ind, true, true, true);
-	ublox_cfg_append_enable_glo(buffer, &ind, true, true, true);
-	ublox_cfg_valset(buffer, ind, true, true, true);
-#else
-	ubx_cfg_gnss gnss;
-	memset(&gnss, 0, sizeof(ubx_cfg_gnss));
-	gnss.num_ch_hw = 32;
-	gnss.num_ch_use = 0xFF;
-	gnss.num_blocks = 4;
+		ublox_cfg_nmea(&nmea);
 
-	gnss.blocks[0].gnss_id = UBX_GNSS_ID_GPS;
-	gnss.blocks[0].en = true;
-	gnss.blocks[0].minTrkCh = 6;
-	gnss.blocks[0].maxTrkCh = 16;
-	gnss.blocks[0].flags = UBX_CFG_GNSS_GPS_L1C;
+		ubx_cfg_gnss gnss;
+		memset(&gnss, 0, sizeof(ubx_cfg_gnss));
+		gnss.num_ch_hw = 32;
+		gnss.num_ch_use = 0xFF;
+		gnss.num_blocks = 4;
 
-	gnss.blocks[1].gnss_id = UBX_GNSS_ID_SBAS;
-	gnss.blocks[1].en = true;
-	gnss.blocks[1].minTrkCh = 0;
-	gnss.blocks[1].maxTrkCh = 3;
-	gnss.blocks[1].flags = UBX_CFG_GNSS_SBAS_L1C;
+		gnss.blocks[0].gnss_id = UBX_GNSS_ID_GPS;
+		gnss.blocks[0].en = true;
+		gnss.blocks[0].minTrkCh = 6;
+		gnss.blocks[0].maxTrkCh = 16;
+		gnss.blocks[0].flags = UBX_CFG_GNSS_GPS_L1C;
 
-	gnss.blocks[2].gnss_id = UBX_GNSS_ID_GLONASS;
-	gnss.blocks[2].en = true;
-	gnss.blocks[2].minTrkCh = 6;
-	gnss.blocks[2].maxTrkCh = 16;
-	gnss.blocks[2].flags = UBX_CFG_GNSS_GLO_L1;
+		gnss.blocks[1].gnss_id = UBX_GNSS_ID_SBAS;
+		gnss.blocks[1].en = true;
+		gnss.blocks[1].minTrkCh = 0;
+		gnss.blocks[1].maxTrkCh = 3;
+		gnss.blocks[1].flags = UBX_CFG_GNSS_SBAS_L1C;
 
-	gnss.blocks[3].gnss_id = UBX_GNSS_ID_BEIDOU;
-	gnss.blocks[3].en = false;
-	gnss.blocks[3].minTrkCh = 6;
-	gnss.blocks[3].maxTrkCh = 16;
-	gnss.blocks[3].flags = UBX_CFG_GNSS_BDS_B1L;
+		gnss.blocks[2].gnss_id = UBX_GNSS_ID_GLONASS;
+		gnss.blocks[2].en = true;
+		gnss.blocks[2].minTrkCh = 6;
+		gnss.blocks[2].maxTrkCh = 16;
+		gnss.blocks[2].flags = UBX_CFG_GNSS_GLO_L1;
 
-	ublox_cfg_gnss(&gnss);
-#endif
+		gnss.blocks[3].gnss_id = UBX_GNSS_ID_BEIDOU;
+		gnss.blocks[3].en = false;
+		gnss.blocks[3].minTrkCh = 6;
+		gnss.blocks[3].maxTrkCh = 16;
+		gnss.blocks[3].flags = UBX_CFG_GNSS_BDS_B1L;
+
+		ublox_cfg_gnss(&gnss);
+	} else {
+		if (!thd_rx_is_running) {
+			return false;
+		}
+
+		unsigned char buffer[90];
+		int ind = 0;
+
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GGA_UART1, 1);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GSV_UART1, 1);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_RMC_UART1, 1);
+
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_UBX_NAV_SAT_UART1, 1);
+
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_DTM_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GBS_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GLL_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GNS_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GRS_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GSA_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_GST_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_RLM_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_VLW_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_VTG_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_NMEA_ID_ZDA_UART1, 0);
+		ublox_cfg_append_u1(buffer, &ind, CFG_MSGOUT_PUBX_ID_POLYP_UART1, 0);
+
+		ublox_cfg_valset(buffer, ind, BAUDRATE, true, true);
+	}
 
 	terminal_register_command_callback(
 			"ubx_poll",
@@ -327,13 +447,30 @@ bool ublox_init(bool print) {
 			"[msg]",
 			ubx_terminal_cmd_poll);
 
+	m_init_ok = true;
+
 	return true;
+}
+
+void ublox_stop(int num_uart) {
+	if (m_uart_num != num_uart) {
+		return;
+	}
+
+	should_terminate = true;
+	while (thd_rx_is_running) {
+		vTaskDelay(1);
+	}
+}
+
+bool ublox_init_ok(void) {
+	return m_init_ok;
 }
 
 void ublox_send(unsigned char *data, unsigned int len) {
 	// Wait for the previous transmission to finish.
-	uart_wait_tx_done(UART_NUM, 1000 / portTICK_PERIOD_MS);
-	uart_write_bytes(UART_NUM, data, len);
+	uart_wait_tx_done(m_uart_num, 1000 / portTICK_PERIOD_MS);
+	uart_write_bytes(m_uart_num, data, len);
 }
 
 void ublox_set_rx_callback_nav_sol(void(*func)(ubx_nav_sol *sol)) {
@@ -842,6 +979,23 @@ void ublox_cfg_append_enable_glo(unsigned char *buffer, int *ind,
 	ubx_put_U1(buffer, ind, en_l1);
 	ubx_put_X4(buffer, ind, CFG_SIGNAL_GLO_L2_ENA);
 	ubx_put_U1(buffer, ind, en_l2);
+}
+
+void ublox_cfg_append_uart1_baud(unsigned char *buffer, int *ind, uint32_t baud) {
+	ubx_put_X4(buffer, ind, CFG_UART1_BAUDRATE);
+	ubx_put_U4(buffer, ind, baud);
+}
+
+void ublox_cfg_append_rate(unsigned char *buffer, int *ind, uint16_t meas_ms, uint16_t nav) {
+	ubx_put_X4(buffer, ind, CFG_RATE_MEAS);
+	ubx_put_U2(buffer, ind, meas_ms);
+	ubx_put_X4(buffer, ind, CFG_RATE_NAV);
+	ubx_put_U2(buffer, ind, nav);
+}
+
+void ublox_cfg_append_u1(unsigned char *buffer, int *ind, uint32_t key, uint8_t val) {
+	ubx_put_X4(buffer, ind, key);
+	ubx_put_U1(buffer, ind, val);
 }
 
 static void proc_byte(uint8_t ch) {

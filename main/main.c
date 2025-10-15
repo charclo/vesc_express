@@ -1,5 +1,6 @@
 /*
-	Copyright 2022 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2022 Benjamin Vedder      benjamin@vedder.se
+	Copyright 2023 Rasmus Söderhielm    rasmus.soderhielm@gmail.com
 
 	This file is part of the VESC firmware.
 
@@ -20,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "driver/uart.h"
 
 #include "conf_general.h"
 #include "comm_ble.h"
@@ -28,19 +30,40 @@
 #include "comm_can.h"
 #include "comm_wifi.h"
 #include "commands.h"
+#include "flash_helper.h"
+#include "crc.h"
+
+#ifdef OVR_CONF_XML_H
+#include OVR_CONF_XML_H
+#else
+#include "confxml.h"
+#endif
+
+#ifdef OVR_CONF_PARSER_H
+#include OVR_CONF_PARSER_H
+#else
 #include "confparser.h"
+#endif
+
 #include "log.h"
 #include "adc.h"
 #include "ublox.h"
 #include "nmea.h"
 #include "terminal.h"
 #include "main.h"
+#include "mempools.h"
+#include "lispif.h"
+#include "bms.h"
+#include "ble/custom_ble.h"
 
 #include <string.h>
 #include <sys/time.h>
 
 // Global variables
 volatile backup_data backup;
+
+// Private variables
+volatile static bool init_done = false;
 
 // Private functions
 static void terminal_nmea(int argc, const char **argv);
@@ -82,7 +105,11 @@ void app_main(void) {
 		}
 
 		if (backup.config_init_flag != MAIN_CONFIG_T_SIGNATURE) {
+#ifdef OVR_CONF_SET_DEFAULTS
+			OVR_CONF_SET_DEFAULTS((main_config_t*)(&backup.config));
+#else
 			confparser_set_defaults_main_config_t((main_config_t*)(&backup.config));
+#endif
 			backup.config_init_flag = MAIN_CONFIG_T_SIGNATURE;
 			backup.config.controller_id = backup.controller_id;
 			backup.config.can_baud_rate = backup.can_baud_rate;
@@ -91,12 +118,37 @@ void app_main(void) {
 		nvs_close(my_handle);
 	}
 
-	commands_init();
-	comm_usb_init();
-	comm_can_init();
+	adc_init();
 
-	if (backup.config.ble_mode != BLE_MODE_DISABLED) {
-		comm_ble_init();
+#ifdef HW_EARLY_LBM_INIT
+	HW_INIT_HOOK();
+	lispif_init();
+	HW_POST_LISPIF_HOOK();
+#endif
+
+	mempools_init();
+	bms_init();
+	commands_init();
+#ifdef CAN_TX_GPIO_NUM
+	comm_can_start(CAN_TX_GPIO_NUM, CAN_RX_GPIO_NUM);
+#endif
+	comm_usb_init();
+
+	vTaskDelay(1);
+
+	switch (backup.config.ble_mode) {
+		case BLE_MODE_DISABLED: {
+			break;
+		}
+		case BLE_MODE_OPEN:
+		case BLE_MODE_ENCRYPTED: {
+			comm_ble_init();
+			break;
+		}
+		case BLE_MODE_SCRIPTING: {
+			custom_ble_init();
+			break;
+		}
 	}
 
 	if (backup.config.wifi_mode != WIFI_MODE_DISABLED) {
@@ -105,15 +157,26 @@ void app_main(void) {
 
 	nmea_init();
 	log_init();
-
-	HW_INIT_HOOK();
-
-#ifdef HW_HAS_ADC
-	adc_init();
+#ifdef SD_PIN_MOSI
+	log_mount_card(SD_PIN_MOSI, SD_PIN_MISO, SD_PIN_SCK, SD_PIN_CS, SDMMC_FREQ_DEFAULT);
+#endif
+#ifdef NAND_PIN_MOSI
+	log_mount_nand_flash(NAND_PIN_MOSI, NAND_PIN_MISO, NAND_PIN_SCK, NAND_PIN_CS, FLASH_FREQ_KHZ);
 #endif
 
-	//	comm_uart_init();
-	ublox_init(false);
+#ifndef HW_EARLY_LBM_INIT
+	HW_INIT_HOOK();
+	lispif_init();
+	HW_POST_LISPIF_HOOK();
+#endif
+
+#ifndef HW_NO_UART
+#ifdef HW_UART_COMM
+	comm_uart_init(UART_TX, UART_RX, UART_NUM, UART_BAUDRATE);
+#else
+	ublox_init(false, 500, UART_NUM, UART_RX, UART_TX);
+#endif
+#endif
 
 	terminal_register_command_callback(
 			"nmea_info",
@@ -127,9 +190,28 @@ void app_main(void) {
 			0,
 			terminal_ublox_reinit);
 
-	for (;;) {
-		vTaskDelay(5000 / portTICK_PERIOD_MS);
+	init_done = true;
+
+	// Exit main to free up heap-space
+	vTaskDelete(NULL);
+}
+
+uint32_t main_calc_hw_crc(void) {
+	uint32_t crc = 0;
+
+	crc = crc32_with_init(
+			data_main_config_t_,
+			DATA_MAIN_CONFIG_T__SIZE,
+			crc);
+
+	if (flash_helper_code_size(CODE_IND_QML) > 0) {
+		crc = crc32_with_init(
+				flash_helper_code_data_ptr(CODE_IND_QML),
+				flash_helper_code_size(CODE_IND_QML),
+				crc);
 	}
+
+	return crc;
 }
 
 void main_store_backup_data(void) {
@@ -140,6 +222,16 @@ void main_store_backup_data(void) {
 	nvs_set_blob(my_handle, "backup", (void*)&backup, sizeof(backup_data));
 	nvs_commit(my_handle);
 	nvs_close(my_handle);
+}
+
+bool main_init_done(void) {
+	return init_done;
+}
+
+void main_wait_until_init_done(void) {
+	while (!init_done) {
+		vTaskDelay(5 / portTICK_PERIOD_MS);
+	}
 }
 
 static void terminal_nmea(int argc, const char **argv) {
@@ -157,10 +249,7 @@ static void terminal_nmea(int argc, const char **argv) {
 			"Lat       : %.8f\n"
 			"Lon       : %.8f\n"
 			"Height    : %f\n"
-			"Time      : %02d-%02d-%02d %02d:%02d:%02d\n"
-			"Last GGA  : %s"
-			"Last GSV  : %s"
-			"Last RMC  : %s\n",
+			"Time      : %02d-%02d-%02d %02d:%02d:%02d\n",
 			s->gga_cnt,
 			s->gsv_gp_cnt,
 			s->gsv_gl_cnt,
@@ -171,13 +260,11 @@ static void terminal_nmea(int argc, const char **argv) {
 			s->gga.lat,
 			s->gga.lon,
 			s->gga.height,
-			s->rmc.yy, s->rmc.mo, s->rmc.dd, s->rmc.hh, s->rmc.mm, s->rmc.ss,
-			s->last_gga,
-			s->last_gsv,
-			s->last_rmc);
+			s->rmc.yy, s->rmc.mo, s->rmc.dd, s->rmc.hh, s->rmc.mm, s->rmc.ss
+			);
 }
 
 static void terminal_ublox_reinit(int argc, const char **argv) {
 	(void)argc;(void)argv;
-	commands_printf("Res: %d", ublox_init(true));
+	commands_printf("Res: %d", ublox_init(true, 500, UART_NUM, UART_RX, UART_TX));
 }

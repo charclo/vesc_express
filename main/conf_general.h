@@ -20,12 +20,11 @@
 #ifndef MAIN_CONF_GENERAL_H_
 #define MAIN_CONF_GENERAL_H_
 
-#include "conf_default.h"
 #include "datatypes.h"
 
 // Firmware version
 #define FW_VERSION_MAJOR			6
-#define FW_VERSION_MINOR			02
+#define FW_VERSION_MINOR			06
 // Set to 0 for building a release and iterate during beta test builds
 #define FW_TEST_VERSION_NUMBER		0
 
@@ -33,8 +32,65 @@
 #define HW_HEADER					"hw_xp_t.h"
 #define HW_SOURCE					"hw_xp_t.c"
 
+//#define HW_HEADER					"hw_str365.h"
+//#define HW_SOURCE					"hw_str365.c"
+
+//#define HW_HEADER					"hw_bms_rb.h"
+//#define HW_SOURCE					"hw_bms_rb.c"
+
+//#define HW_HEADER					"hw_disp_v1.h"
+//#define HW_SOURCE					"hw_disp_v1.c"
+
+//#define HW_HEADER					"hw_devkit_c3.h"
+//#define HW_SOURCE					"hw_devkit_c3.c"
+
+//#define HW_HEADER					"hw_vbms32.h"
+//#define HW_SOURCE					"hw_vbms32.c"
+
+//#define HW_HEADER					"hw_vdisp_dual.h"
+//#define HW_SOURCE					"hw_vdisp_dual.c"
+
+//#define HW_HEADER					"hw_lifan.h"
+//#define HW_SOURCE					"hw_lifan.c"
+
 //#define HW_HEADER					"hw_lb_if.h"
 //#define HW_SOURCE					"hw_lb_if.c"
+
+//#define HW_HEADER					"hw_lb_bms_wifi.h"
+//#define HW_SOURCE					"hw_lb_bms_wifi.c"
+
+//#define HW_HEADER					"hw_lb_ant.h"
+//#define HW_SOURCE					"hw_lb_ant.c"
+
+//#define HW_HEADER					"hw_lb_hc.h"
+//#define HW_SOURCE					"hw_lb_hc.c"
+
+//#define HW_HEADER					"hw_lb_chg.h"
+//#define HW_SOURCE					"hw_lb_chg.c"
+
+//#define HW_HEADER					"hw_scope.h"
+//#define HW_SOURCE					"hw_scope.c"
+
+//#define HW_HEADER					"hw_stick.h"
+//#define HW_SOURCE					"hw_stick.c"
+
+//#define HW_HEADER					"hw_duet.h"
+//#define HW_SOURCE					"hw_duet.c"
+
+//#define HW_HEADER					"hw_link.h"
+//#define HW_SOURCE					"hw_link.c"
+
+//#define HW_HEADER					"hw_vdisp_900.h"
+//#define HW_SOURCE					"hw_vdisp_900.c"
+
+//#define HW_HEADER					"hw_nanolog.h"
+//#define HW_SOURCE					"hw_nanolog.c"
+
+//#define HW_HEADER					"hw_vbms16.h"
+//#define HW_SOURCE					"hw_vbms16.c"
+
+//#define HW_HEADER					"hw_rmcore.h"
+//#define HW_SOURCE					"hw_rmcore.c"
 #endif
 
 #if !defined(HW_SOURCE) && !defined(HW_SOURCE_ALT)
@@ -45,8 +101,7 @@
 #error "No hardware header file set"
 #endif
 
-#define HW_DEFAULT_ID				2
-
+#include "main.h"
 #include "hw.h"
 
 #endif /* MAIN_CONF_GENERAL_H_ */

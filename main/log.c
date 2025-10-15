@@ -26,12 +26,14 @@
 #include "esp_vfs.h"
 #include "buffer.h"
 #include "utils.h"
+#include "esp_vfs_fat_nand.h"
 
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 typedef struct {
 	char key[25];
@@ -46,7 +48,13 @@ typedef struct {
 
 #define LOG_MAX_FIELDS		120
 
+char *file_basepath = "/sdcard/";
+
 // Private variables
+static sdmmc_host_t m_host = SDSPI_HOST_DEFAULT();
+static sdmmc_card_t *m_card = 0;
+static spi_nand_flash_device_t *nand_flash_device_handle = 0;
+
 static volatile log_header m_headers[LOG_MAX_FIELDS];
 
 static log_header m_header_ts;
@@ -74,8 +82,14 @@ static void log_task(void *arg) {
 	int gga_cnt_last = 0;
 	int rmc_cnt_last = 0;
 	int64_t ms_last = utils_ms_tot();
+	TickType_t tick_last_fsync = xTaskGetTickCount();
 
 	for (;;) {
+		if (!m_card) {
+			vTaskDelay(10);
+			continue;
+		}
+
 		nmea_state_t *s = nmea_get_state();
 
 		bool date_valid = true;
@@ -101,22 +115,48 @@ static void log_task(void *arg) {
 				vTaskDelay(configTICK_RATE_HZ / 100);
 				continue;
 			}
+			
+			char path[200];
 
-			if (date_valid) {
-				char path[200];
-				sprintf(path,
-						"/sdcard/log_can/date/%02d-%02d-%02d %02d-%02d-%02d.csv",
-						s->rmc.yy, s->rmc.mo, s->rmc.dd, s->rmc.hh, s->rmc.mm, s->rmc.ss);
-				f_log = fopen(path, "w");
-			} else {
-				char path[200];
-				for (int i = 0;i < 999;i++) {
-					sprintf(path, "/sdcard/log_can/no_date/log_%03d.csv", i);
-					if (access(path, F_OK) != 0) {
-						f_log = fopen(path, "w");
-						break;
+			// Note: This directory is created when COMM_LOG_START is
+			//   received.
+			sprintf(path, "%slog_can/", file_basepath);
+			DIR *dir = opendir(path);
+			if (dir) {
+				int highest_index = -1;
+				struct dirent *entry;
+				while ((entry = readdir(dir)) != NULL) {
+					// Log name example: "log_001_2025-04-07_17-37-00.csv"
+					if (entry->d_type == DT_REG
+						&& strncmp(entry->d_name, "log_", 4) == 0) {
+						const char *index_start =
+							&entry->d_name[strlen("log_")];
+
+						char *digits_end;
+
+						int index = (int)strtol(index_start, &digits_end, 10);
+						if (digits_end != index_start
+							&& index > highest_index) {
+							highest_index = index;
+						}
 					}
 				}
+				closedir(dir);
+
+				if (date_valid) {
+					sprintf(
+						path,
+						"%slog_can/log_%03d_%02d-%02d-%02d_%02d-%02d-%02d.csv",
+						file_basepath, highest_index + 1, s->rmc.yy, s->rmc.mo,
+						s->rmc.dd, s->rmc.hh, s->rmc.mm, s->rmc.ss
+					);
+				} else {
+					sprintf(
+						path, "%slog_can/log_%03d.csv", file_basepath,
+						highest_index + 1
+					);
+				}
+				f_log = fopen(path, "w");
 			}
 
 			if (f_log) {
@@ -233,6 +273,11 @@ static void log_task(void *arg) {
 					fprintf(f_log, ";");
 				}
 			}
+
+			if (UTILS_AGE_S(tick_last_fsync) > 2.0) {
+				tick_last_fsync = xTaskGetTickCount();
+				fsync(fileno(f_log));
+			}
 		}
 
 		if (m_rate_hz < 0.1) {
@@ -249,8 +294,106 @@ static void log_task(void *arg) {
 	}
 }
 
+esp_err_t log_mount_card(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, int freq) {
+	esp_err_t ret;
+
+	esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+			.format_if_mount_failed = true,
+			.max_files = 5,
+			.allocation_unit_size = 8192
+	};
+
+	m_host.max_freq_khz = freq;
+
+	spi_bus_config_t bus_cfg = {
+			.mosi_io_num = pin_mosi,
+			.miso_io_num = pin_miso,
+			.sclk_io_num = pin_sck,
+			.quadwp_io_num = -1,
+			.quadhd_io_num = -1,
+			.max_transfer_sz = 4092,
+	};
+
+	log_unmount_card();
+
+	ret = spi_bus_initialize(m_host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
+	if (ret != ESP_OK) {
+		return ret;
+	}
+
+	sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+	slot_config.gpio_cs = pin_cs;
+	slot_config.host_id = m_host.slot;
+
+	file_basepath = "/sdcard/";
+	return esp_vfs_fat_sdspi_mount("/sdcard", &m_host, &slot_config, &mount_config, &m_card);
+}
+
+void log_unmount_card(void) {
+	if (m_card) {
+		esp_vfs_fat_sdcard_unmount("/sdcard", m_card);
+		m_card = 0;
+	}
+
+	spi_bus_free(m_host.slot);
+}
+
+bool log_mount_nand_flash(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, int freq) {
+	esp_err_t ret;
+
+	const spi_bus_config_t bus_config = {
+			.mosi_io_num = pin_mosi,
+			.miso_io_num = pin_miso,
+			.sclk_io_num = pin_sck,
+			.quadwp_io_num = -1,
+			.quadhd_io_num = -1,
+			.max_transfer_sz = 32,
+	};
+
+	spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+
+	spi_device_interface_config_t devcfg = {
+			.clock_speed_hz = freq * 1000,
+			.mode = 0,
+			.spics_io_num = pin_cs,
+			.queue_size = 10,
+			.flags = SPI_DEVICE_HALFDUPLEX,
+	};
+
+	spi_device_handle_t spi;
+	spi_bus_add_device(SPI2_HOST, &devcfg, &spi);
+
+	spi_nand_flash_config_t nand_flash_config = {
+			.device_handle = spi,
+	};
+
+	spi_nand_flash_init_device(&nand_flash_config, &nand_flash_device_handle);
+
+	esp_vfs_fat_mount_config_t config = {
+			.max_files = 4,
+			.format_if_mount_failed = true,
+			.allocation_unit_size = 16 * 1024
+	};
+
+	file_basepath = "/nandflash/";
+	ret = esp_vfs_fat_nand_mount("/nandflash", nand_flash_device_handle, &config);
+
+	if (ret != ESP_OK) {
+		return false;
+	}
+
+	return true;
+}
+
+void log_unmount_nand_flash (void) {
+	if (nand_flash_device_handle) {
+		esp_vfs_fat_nand_unmount("/nandflash", nand_flash_device_handle);
+		spi_nand_flash_deinit_device(nand_flash_device_handle);
+		nand_flash_device_handle = 0;
+	}
+}
+
 bool log_init(void) {
-#ifdef SD_PIN_MOSI
 	for (int i = 0;i < LOG_MAX_FIELDS;i++) {
 		sprintf((char*)m_headers[i].key, "key_h%d", i);
 		sprintf((char*)m_headers[i].name, "name_h%d", i);
@@ -326,46 +469,9 @@ bool log_init(void) {
 	m_header_hvel.value = 0.0;
 	m_header_hvel.updated = false;
 
-	esp_err_t ret;
-
-	esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-			.format_if_mount_failed = true,
-			.max_files = 5,
-			.allocation_unit_size = 16 * 1024
-	};
-
-	sdmmc_card_t *card;
-	sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-	host.max_freq_khz = 20000;
-
-	spi_bus_config_t bus_cfg = {
-			.mosi_io_num = SD_PIN_MOSI,
-			.miso_io_num = SD_PIN_MISO,
-			.sclk_io_num = SD_PIN_SCK,
-			.quadwp_io_num = -1,
-			.quadhd_io_num = -1,
-			.max_transfer_sz = 4000,
-	};
-
-	spi_bus_initialize(host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
-
-	sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-	slot_config.gpio_cs = SD_PIN_CS;
-	slot_config.host_id = host.slot;
-
-	ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-
-	if (ret != ESP_OK) {
-		return false;
-	}
-
-	xTaskCreatePinnedToCore(log_task, "log", 4096, NULL, 8, NULL, tskNO_AFFINITY);
+	xTaskCreatePinnedToCore(log_task, "log", 3072, NULL, 8, NULL, tskNO_AFFINITY);
 
 	return true;
-#else
-	(void)log_task;
-	return true;
-#endif
 }
 
 void log_process_packet(unsigned char *data, unsigned int len) {
@@ -379,9 +485,9 @@ void log_process_packet(unsigned char *data, unsigned int len) {
 			break;
 		}
 
-		mkdir("/sdcard/log_can", 0775);
-		mkdir("/sdcard/log_can/date", 0775);
-		mkdir("/sdcard/log_can/no_date", 0775);
+		char path[30];
+		sprintf(path, "%slog_can", file_basepath);
+		mkdir(path, 0775);
 
 		int32_t ind = 0;
 		m_field_num = buffer_get_int16(data, &ind);

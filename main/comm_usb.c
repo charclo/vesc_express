@@ -15,11 +15,24 @@
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
-    */
+ */
 
 #include "commands.h"
 #include "comm_usb.h"
 #include "packet.h"
+
+#include <string.h>
+#include <stdbool.h>
+#include <stdatomic.h>
+#include "esp_log.h"
+#include "hal/usb_serial_jtag_ll.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/ringbuf.h"
+#include "esp_intr_alloc.h"
+#include "soc/periph_defs.h"
+#include "soc/soc_caps.h"
+#include "esp_private/periph_ctrl.h"
 #include "driver/usb_serial_jtag.h"
 
 static PACKET_STATE_t packet_state;
@@ -38,20 +51,38 @@ static void process_packet(unsigned char *data, unsigned int len) {
 
 static void send_packet_raw(unsigned char *buffer, unsigned int len) {
 	unsigned int sent = 0;
+	int fail_cnt = 0;
+
 	while (sent < len) {
-		sent += usb_serial_jtag_write_bytes(buffer + sent, len - sent, portMAX_DELAY);
+		int to_send = len - sent;
+		if (to_send > 150) {
+			to_send = 150;
+		}
+
+		unsigned int sent_now = usb_serial_jtag_write_bytes(buffer + sent, to_send, 10);
+		sent += sent_now;
+
+		if (sent_now == 0) {
+			fail_cnt++;
+		} else {
+			fail_cnt = 0;
+		}
+
+		if (fail_cnt >= 3) {
+			break;
+		}
 	}
 }
 
 void comm_usb_init(void) {
 	usb_serial_jtag_driver_config_t usb_serial_jtag_config;
 	usb_serial_jtag_config.rx_buffer_size = 1024;
-	usb_serial_jtag_config.tx_buffer_size = 1024;
+	usb_serial_jtag_config.tx_buffer_size = 256;
 	usb_serial_jtag_driver_install(&usb_serial_jtag_config);
 
 	packet_init(send_packet_raw, process_packet, &packet_state);
 
-	xTaskCreatePinnedToCore(rx_task, "usb_rx", 4096, NULL, 8, NULL, tskNO_AFFINITY);
+	xTaskCreatePinnedToCore(rx_task, "usb_rx", 3072, NULL, 8, NULL, tskNO_AFFINITY);
 }
 
 void comm_usb_send_packet(unsigned char *data, unsigned int len) {
