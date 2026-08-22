@@ -54,6 +54,7 @@
 #include "main.h"
 #include "utils.h"
 #include "packet.h"
+#include "ble_client.h"
 #if CONFIG_BT_BLUEDROID_ENABLED
 
 #define ADV_CFG_FLAG      (1 << 0)
@@ -422,6 +423,12 @@ static void gap_event_handler(
 			break;
 		}
 		default: {
+			// Events belonging to the client (scanning) role, e.g.
+			// ESP_GAP_BLE_SCAN_RESULT_EVT, aren't handled by the GATT
+			// server above - there is only a single GAP callback for the
+			// whole Bluedroid stack, so forward anything unhandled to the
+			// BLE client module instead of dropping it.
+			ble_client_handle_gap_event(event, param);
 			break;
 		}
 	}
@@ -680,6 +687,13 @@ custom_ble_result_t custom_ble_start() {
 	esp_ble_gatts_register_callback(gatts_event_handler);
 	esp_ble_gap_register_callback(gap_event_handler);
 	esp_ble_gatts_app_register(0);
+
+	// Bring up the BLE central (client) role on the same Bluedroid
+	// instance. This only registers a GATTC application and doesn't affect
+	// the GATT server / advertising role started above.
+	if (ble_client_start() != BLE_CLIENT_OK) {
+		STORED_LOGF("ble_client_start failed");
+	}
 
 	has_started = true;
 

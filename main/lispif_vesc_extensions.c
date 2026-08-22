@@ -40,6 +40,7 @@
 #include "lispif_touch_extensions.h"
 #include "lispif_wifi_extensions.h"
 #include "lispif_ble_extensions.h"
+#include "lispif_ble_client_extensions.h"
 #include "lispif_rgbled_extensions.h"
 #include "lbm_color_extensions.h"
 #include "lbm_constants.h"
@@ -2096,6 +2097,12 @@ static lbm_value ext_enable_event(lbm_value *args, lbm_uint argn) {
 		event_bms_force_bal_en = en;
 	} else if (name == sym_bms_zero_ofs) {
 		event_bms_zero_ofs_en = en;
+	} else if (name == sym_event_ble_scan) {
+		event_ble_scan_en = en;
+	} else if (name == sym_event_ble_client_connect) {
+		event_ble_client_connect_en = en;
+	} else if (name == sym_event_ble_client_data) {
+		event_ble_client_data_en = en;
 	} else {
 		return ENC_SYM_EERROR;
 	}
@@ -7004,6 +7011,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		if (backup.config.ble_mode == BLE_MODE_SCRIPTING) {
 			#if CONFIG_BT_BLUEDROID_ENABLED
 			lispif_load_ble_extensions();
+			lispif_load_ble_client_extensions();
 			#endif
 		}
 

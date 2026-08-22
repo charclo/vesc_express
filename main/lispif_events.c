@@ -22,6 +22,10 @@ volatile bool event_bms_reset_cnt_en = false;
 volatile bool event_bms_force_bal_en = false;
 volatile bool event_bms_zero_ofs_en = false;
 
+volatile bool event_ble_scan_en = false;
+volatile bool event_ble_client_connect_en = false;
+volatile bool event_ble_client_data_en = false;
+
 lbm_uint sym_event_can_sid = 0;
 lbm_uint sym_event_can_eid = 0;
 lbm_uint sym_event_data_rx = 0;
@@ -38,6 +42,10 @@ lbm_uint sym_bms_bal_ovr = 0;
 lbm_uint sym_bms_reset_cnt = 0;
 lbm_uint sym_bms_force_bal = 0;
 lbm_uint sym_bms_zero_ofs = 0;
+
+lbm_uint sym_event_ble_scan = 0;
+lbm_uint sym_event_ble_client_connect = 0;
+lbm_uint sym_event_ble_client_data = 0;
 
 void lispif_events_load_symbols() {
     lbm_add_symbol_const("event-can-sid", &sym_event_can_sid);
@@ -56,4 +64,8 @@ void lispif_events_load_symbols() {
 	lbm_add_symbol_const("event-bms-reset-cnt", &sym_bms_reset_cnt);
 	lbm_add_symbol_const("event-bms-force-bal", &sym_bms_force_bal);
 	lbm_add_symbol_const("event-bms-zero-ofs", &sym_bms_zero_ofs);
+
+	lbm_add_symbol_const("event-ble-scan", &sym_event_ble_scan);
+	lbm_add_symbol_const("event-ble-client-connect", &sym_event_ble_client_connect);
+	lbm_add_symbol_const("event-ble-client-data", &sym_event_ble_client_data);
 }

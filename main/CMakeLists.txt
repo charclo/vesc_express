@@ -69,6 +69,7 @@ set(COMPONENT_SRCS
 "wifi/lispif_wifi_extensions.c"
 
 "ble/custom_ble.c"
+"ble/ble_client.c"
 
 "rgbled/lispif_rgbled_extensions.c"
 
@@ -107,6 +108,7 @@ set(COMPONENT_SRCS
 if(CONFIG_BT_BLUEDROID_ENABLED)
     list(APPEND COMPONENT_SRCS
         "ble/lispif_ble_extensions.c"
+        "ble/lispif_ble_client_extensions.c"
     )
 endif()
 

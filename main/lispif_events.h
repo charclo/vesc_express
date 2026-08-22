@@ -18,6 +18,10 @@ extern volatile bool event_bms_reset_cnt_en;
 extern volatile bool event_bms_force_bal_en;
 extern volatile bool event_bms_zero_ofs_en;
 
+extern volatile bool event_ble_scan_en;
+extern volatile bool event_ble_client_connect_en;
+extern volatile bool event_ble_client_data_en;
+
 extern lbm_uint sym_event_can_sid;
 extern lbm_uint sym_event_can_eid;
 extern lbm_uint sym_event_data_rx;
@@ -34,5 +38,9 @@ extern lbm_uint sym_bms_bal_ovr;
 extern lbm_uint sym_bms_reset_cnt;
 extern lbm_uint sym_bms_force_bal;
 extern lbm_uint sym_bms_zero_ofs;
+
+extern lbm_uint sym_event_ble_scan;
+extern lbm_uint sym_event_ble_client_connect;
+extern lbm_uint sym_event_ble_client_data;
 
 void lispif_events_load_symbols();
