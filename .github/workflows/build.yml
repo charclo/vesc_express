@@ -4,38 +4,72 @@ name: Build firmware
 # doesn't change CI behavior for the rest of the repo without being asked.
 # Broaden the `branches` filter (or add `pull_request`) if you want this
 # to run more broadly.
+#
+# Builds only the default esp32c3 target ("VESC Express T") for now -
+# widen with a target/HW_NAME matrix (or switch to build_all.py) if you
+# want broader coverage again.
 on:
   push:
     branches:
       - 'claude/**'
   workflow_dispatch: {}
 
+env:
+  IDF_VERSION: v5.5.4
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    # Espressif's official image for the ESP-IDF version this project
-    # currently targets (see README.md) - comes with all toolchains
-    # preinstalled, no need to run install.sh.
-    container:
-      image: espressif/idf:v5.5.4
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Mark workspace as safe for git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget flex bison gperf python3 python3-pip python3-venv \
+            cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
 
-      - name: Build all hardware targets
+      # Caches both the ESP-IDF checkout and its downloaded toolchain/tools
+      # (~/.espressif), so a cache hit skips the clone and install.sh
+      # entirely instead of re-pulling a multi-GB Docker image or
+      # toolchain archive on every run.
+      - name: Cache ESP-IDF checkout + toolchain
+        id: idf-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/esp/esp-idf-${{ env.IDF_VERSION }}
+            ~/.espressif
+          key: esp-idf-${{ env.IDF_VERSION }}-esp32c3-${{ runner.os }}
+
+      - name: Clone ESP-IDF
+        if: steps.idf-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/esp
+          git clone -b ${{ env.IDF_VERSION }} --recursive --depth 1 --shallow-submodules \
+            https://github.com/espressif/esp-idf.git ~/esp/esp-idf-${{ env.IDF_VERSION }}
+
+      - name: Install ESP-IDF tools (esp32c3)
+        if: steps.idf-cache.outputs.cache-hit != 'true'
+        run: ~/esp/esp-idf-${{ env.IDF_VERSION }}/install.sh esp32c3
+
+      - name: Build (esp32c3, default "VESC Express T" target)
         shell: bash
         run: |
-          . "$IDF_PATH/export.sh"
-          python3 build_all.py
+          . ~/esp/esp-idf-${{ env.IDF_VERSION }}/export.sh
+          idf.py set-target esp32c3
+          idf.py build
 
       - name: Upload firmware artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: vesc_express-firmware
-          path: build_output/
+          name: vesc_express-esp32c3-firmware
+          path: |
+            build/vesc_express.bin
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
           if-no-files-found: ignore
