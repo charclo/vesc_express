@@ -31,6 +31,11 @@ esp_err_t log_mount_card(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, in
 void log_unmount_card(void);
 bool log_mount_nand_flash(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, int freq);
 void log_unmount_nand_flash(void);
+#ifdef HW_INTERNAL_FS
+esp_err_t log_mount_storage(void);
+void log_unmount_storage(void);
+esp_err_t log_storage_info(size_t *total, size_t *used);
+#endif
 void log_process_packet(unsigned char *data, unsigned int len);
 
 // Global variables

@@ -1,6 +1,6 @@
 /*
   Copyright 2023 - 2025 Benjamin Vedder            benjamin@vedder.se
-  Copyright 2023 - 2025 Joel Svensson              svenssonjoel@yahoo.se
+  Copyright 2023 - 2026 Joel Svensson              svenssonjoel@yahoo.se
   Copyright 2023        Rasmus Söderhielm          rasmus.soderhielm@gmail.com
   Copyright 2025        Joakim Lundborg            joakim.lundborg@gmail.com
   
@@ -20,14 +20,15 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "sys/types.h"
 #include "tjpgd.h"
 
 #include <math.h>
+#include <string.h>
 
 #include <extensions/display_extensions.h>
 #include <lbm_utils.h>
 #include <lbm_defrag_mem.h>
+#include <lbm_cos_table.h>
 
 #ifdef LBM_OPT_DISPLAY_EXTENSIONS_SIZE
 #pragma GCC optimize ("-Os")
@@ -36,27 +37,8 @@
 #pragma GCC optimize ("-Oz")
 #endif
 
-
 #define MAX_WIDTH 32000
 #define MAX_HEIGHT 32000
-
-// a single quadrant...
-static const uint8_t cos_tab_128[] =
-  {
-   255, 255, 255, 255, 254, 254, 254, 253, 253, 252, // 0 - 9
-   251, 250, 250, 249, 248, 246, 245, 244, 243, 241, //10 - 19
-   240, 238, 237, 235, 234, 232, 230, 228, 226, 224, //20 - 29
-   222, 220, 218, 215, 213, 211, 208, 206, 203, 201, //30 - 39
-   198, 196, 193, 190, 188, 185, 182, 179, 176, 173, //40 - 49
-   170, 167, 165, 162, 158, 155, 152, 149, 146, 143, //50 - 59
-   140, 137, 134, 131, 127, 124, 121, 118, 115, 112, //60 - 69
-   109, 106, 103, 100, 97,  93,  90,  88,  85,  82,  //70 - 79
-   79,  76,  73,  70,  67,  65,  62,  59,  57,  54,  //80 - 89
-   52,  49,  47,  44,  42,  40,  37,  35,  33,  31,  //90 - 99
-   29,  27,  25,  23,  21,  20,  18,  17,  15,  14,  //100 - 109
-   12,  11,  10,  9,   7,   6,   5,   5,   4,   3,   //110 - 119
-   2,   2,   1,   1,   1,   0,   0,   0              //120 - 127
-};
 
 uint32_t lbm_display_rgb888_from_color(color_t color, int x, int y) {
   switch (color.type) {
@@ -83,7 +65,7 @@ uint32_t lbm_display_rgb888_from_color(color_t color, int x, int y) {
       tab_pos += used_len;
     }
 
-    uint32_t tab_val = (uint32_t)cos_tab_128[tab_pos <= 127 ? tab_pos : 128 - (tab_pos - 127)];
+    uint32_t tab_val = (uint32_t)lbm_cos_tab_128[tab_pos <= 127 ? tab_pos : 128 - (tab_pos - 127)];
 
     uint32_t r = (r1 * tab_val + r2 * (255 - tab_val)) / 255;
     uint32_t g = (g1 * tab_val + g2 * (255 - tab_val)) / 255;
@@ -132,6 +114,12 @@ static lbm_uint symbol_repeat_type = 0;
 
 static lbm_uint symbol_down = 0;
 static lbm_uint symbol_up = 0;
+static lbm_uint symbol_magnify = 0;
+static lbm_uint symbol_spacing = 0;
+static lbm_uint symbol_align = 0;
+static lbm_uint symbol_left = 0;
+static lbm_uint symbol_center = 0;
+static lbm_uint symbol_right = 0;
 
 bool display_is_symbol_up(lbm_value v) {
   if (lbm_is_symbol(v)) {
@@ -357,6 +345,12 @@ static bool register_symbols(void) {
 
   res = res && lbm_add_symbol_const("down", &symbol_down);
   res = res && lbm_add_symbol_const("up", &symbol_up);
+  res = res && lbm_add_symbol_const("magnify", &symbol_magnify);
+  res = res && lbm_add_symbol_const("spacing", &symbol_spacing);
+  res = res && lbm_add_symbol_const("align", &symbol_align);
+  res = res && lbm_add_symbol_const("left", &symbol_left);
+  res = res && lbm_add_symbol_const("center", &symbol_center);
+  res = res && lbm_add_symbol_const("right", &symbol_right);
 
   return res;
 }
@@ -364,13 +358,8 @@ static bool register_symbols(void) {
 // Internal functions
 
 static int sign(int v) {
-  if (v > 0) {
-    return 1;
-  } else if (v < 0) {
-    return -1;
-  } else {
-    return 0;
-  }
+  const int shift = (sizeof(int) * 8) -1;
+  return (v >> shift) - (-v >> shift);
 }
 
 // Geometry utility functions
@@ -416,8 +405,8 @@ static uint8_t rgb888to332(uint32_t rgb) {
   uint8_t r = (uint8_t)(rgb >> (16 + 5));
   uint8_t g = (uint8_t)(rgb >> (8 + 5));
   uint8_t b = (uint8_t)(rgb >> 6);
-  r = (r & 0x7) << 5;
-  g = (g & 0x7) << 2;
+  r = (uint8_t)((r & 0x7) << 5);
+  g = (uint8_t)((g & 0x7) << 2);
   b = (b & 0x3);
   uint8_t res_rgb332 = r | g | b;
   return res_rgb332;
@@ -427,8 +416,8 @@ static uint16_t rgb888to565(uint32_t rgb) {
   uint16_t r = (uint16_t)(rgb >> (16 + 3));
   uint16_t g = (uint16_t)(rgb >> (8 + 2));
   uint16_t b = (uint16_t)(rgb >> 3);
-  r = r << 11;
-  g = (g & 0x3F) << 5;
+  r = (uint16_t)(r << 11);
+  g = (uint16_t)((g & 0x3F) << 5);
   b = (b & 0x1F);
   uint16_t res_rgb565 = r | g | b;
   return res_rgb565;
@@ -521,7 +510,7 @@ void image_buffer_clear(image_buffer_t *img, uint32_t cc) {
   case rgb565: {
     uint16_t c = rgb888to565(cc);
     uint8_t *dp = (uint8_t*)data;
-    for (unsigned int i = 0; i < img_size/2; i +=2) {
+    for (unsigned int i = 0; i < img_size * 2; i +=2) {
       dp[i] = (uint8_t)(c >> 8);
       dp[i+1] = (uint8_t)c;
     }
@@ -607,6 +596,98 @@ void putpixel(image_buffer_t* img, int x_i, int y_i, uint32_t c) {
   }
 }
 
+static const uint8_t retro5x7[] = {
+    5, 7, 91, 1, 0, 0, 0, 0, 0, 132, 16, 2, 8, 0, 74, 1, 0, 0, 0, 74,
+    125, 245, 149, 2, 196, 23, 71, 31, 1, 115, 33, 34, 116, 6, 38, 21, 83, 147, 5, 132,
+    0, 0, 0, 0, 136, 8, 33, 8, 2, 130, 32, 132, 136, 0, 64, 145, 79, 20, 0, 128,
+    144, 79, 8, 0, 0, 0, 192, 136, 0, 0, 128, 15, 0, 0, 0, 0, 0, 140, 1, 16,
+    33, 34, 68, 0, 46, 230, 58, 163, 3, 196, 16, 66, 136, 3, 46, 66, 38, 194, 7, 46,
+    66, 7, 163, 3, 76, 165, 244, 17, 2, 63, 60, 8, 163, 3, 46, 132, 23, 163, 3, 31,
+    34, 34, 132, 0, 46, 70, 23, 163, 3, 46, 70, 15, 161, 3, 192, 24, 96, 12, 0, 192,
+    24, 96, 68, 0, 136, 136, 32, 8, 2, 0, 124, 240, 1, 0, 130, 32, 136, 136, 0, 46,
+    66, 68, 0, 1, 46, 246, 218, 130, 3, 68, 197, 248, 99, 4, 47, 198, 23, 227, 3, 46,
+    134, 16, 162, 3, 47, 198, 24, 227, 3, 63, 132, 23, 194, 7, 63, 132, 23, 66, 0, 46,
+    134, 30, 163, 7, 49, 198, 31, 99, 4, 142, 16, 66, 136, 3, 28, 33, 132, 146, 1, 49,
+    149, 81, 82, 4, 33, 132, 16, 194, 7, 113, 215, 24, 99, 4, 113, 214, 28, 99, 4, 46,
+    198, 24, 163, 3, 47, 198, 23, 66, 0, 46, 198, 88, 179, 3, 47, 198, 87, 82, 4, 46,
+    6, 7, 163, 3, 159, 16, 66, 8, 1, 49, 198, 24, 163, 3, 49, 198, 168, 20, 1, 49,
+    198, 90, 119, 4, 49, 42, 162, 98, 4, 49, 42, 66, 8, 1, 31, 34, 34, 194, 7, 78,
+    8, 33, 132, 3, 33, 8, 130, 32, 4, 14, 33, 132, 144, 3, 68, 69, 0, 0, 0, 0,
+    0, 0, 192, 7, 134, 32, 0, 0, 0, 0, 56, 232, 163, 7, 33, 188, 24, 227, 3, 0,
+    184, 16, 162, 3, 16, 250, 24, 163, 7, 0, 184, 248, 131, 3, 76, 136, 39, 132, 0, 192,
+    199, 232, 161, 3, 33, 188, 24, 99, 4, 4, 24, 66, 136, 3, 16, 64, 8, 163, 3, 33,
+    149, 81, 82, 4, 134, 16, 66, 136, 3, 0, 172, 90, 99, 4, 0, 188, 24, 99, 4, 0,
+    184, 24, 163, 3, 224, 197, 248, 66, 0, 192, 199, 232, 33, 4, 0, 188, 24, 66, 0, 0,
+    248, 224, 224, 3, 66, 60, 33, 36, 3, 0, 196, 24, 163, 7, 0, 196, 24, 21, 1, 0,
+    196, 88, 171, 2, 0, 68, 69, 84, 4, 0, 196, 232, 161, 3, 0, 124, 68, 196, 7
+  };
+
+// returns: 1 parsed, 0 not an attr list, -1 malformed/invalid
+static int parse_text_attr(lbm_value v, float *mag, int *spacing, int *align, int *rotation_deg) {
+  if (!lbm_is_cons(v)) {
+    return 0;
+  }
+
+  lbm_value key = lbm_car(v);
+  lbm_value rest = lbm_cdr(v);
+  if (!lbm_is_symbol(key) || !lbm_is_cons(rest)) {
+    return 0;
+  }
+
+  lbm_value val = lbm_car(rest);
+  if (lbm_cdr(rest) != ENC_SYM_NIL) {
+    return -1;
+  }
+
+  lbm_uint sym = lbm_dec_sym(key);
+  if (sym == symbol_magnify || sym == symbol_scale) {
+    if (!lbm_is_number(val)) return -1;
+    float m = lbm_dec_as_float(val);
+    if (m < 0.1f) m = 0.1f;
+    *mag = m;
+    return 1;
+  }
+
+  if (sym == symbol_spacing) {
+    if (!lbm_is_number(val)) return -1;
+    *spacing = lbm_dec_as_i32(val);
+    return 1;
+  }
+
+  if (sym == symbol_align) {
+    if (lbm_is_number(val)) {
+      int a = lbm_dec_as_i32(val);
+      if (a < 0 || a > 2) return -1;
+      *align = a;
+      return 1;
+    }
+
+    if (lbm_is_symbol(val)) {
+      lbm_uint av = lbm_dec_sym(val);
+      if (av == symbol_left) { *align = 0; return 1; }
+      if (av == symbol_center) { *align = 1; return 1; }
+      if (av == symbol_right) { *align = 2; return 1; }
+      return -1;
+    }
+
+    char *astr = lbm_dec_str(val);
+    if (!astr) return -1;
+    if (strcmp(astr, "left") == 0) { *align = 0; return 1; }
+    if (strcmp(astr, "center") == 0) { *align = 1; return 1; }
+    if (strcmp(astr, "right") == 0) { *align = 2; return 1; }
+    return -1;
+  }
+
+  if (sym == symbol_rotate) {
+    if (!lbm_is_number(val)) return -1;
+    int r = lbm_dec_as_i32(val);
+    *rotation_deg = r % 360;
+    return 1;
+  }
+
+  return 0;
+}
+
 uint32_t getpixel(image_buffer_t* img, int x_i, int y_i) {
   uint16_t w = img->width;
   uint16_t h = img->height;
@@ -658,6 +739,161 @@ uint32_t getpixel(image_buffer_t* img, int x_i, int y_i) {
   return 0;
 }
 
+#ifdef USE_EFFICIENT_HLINE_VLINE
+
+// Putpixel inlined into h/v_line and code that does not change along the line
+// is hoisted out of the loop.
+static void h_line(image_buffer_t* img, int x, int y, int len, uint32_t c) {
+  if (len <= 0) return;
+  if (y < 0 || y >= img->height) return;
+  int x0 = x;
+  int x1 = x + len - 1;
+  if (x0 < 0) x0 = 0;
+  if (x1 >= img->width) x1 = img->width - 1;
+  if (x0 > x1) return;
+  uint32_t n = (uint32_t)(x1 - x0 + 1);
+  uint32_t w = img->width;
+  uint8_t *data = img->data;
+
+  switch (img->fmt) {
+  case indexed2: {
+    uint32_t pos0 = (uint32_t)y * w + (uint32_t)x0;
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t pos = pos0 + i;
+      uint32_t byte = pos >> 3, bit = 7 - (pos & 7);
+      if (c) data[byte] |= (uint8_t)(1 << bit);
+      else data[byte] &= (uint8_t)~(1 << bit);
+    }
+    break;
+  }
+  case indexed4: {
+    uint32_t pos0 = (uint32_t)y * w + (uint32_t)x0;
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t pos = pos0 + i;
+      uint32_t byte = pos >> 2, ix = 3 - (pos & 0x3);
+      data[byte] = (uint8_t)((uint8_t)(data[byte] & ~indexed4_mask[ix]) | (uint8_t)(c << indexed4_shift[ix]));
+    }
+    break;
+  }
+  case indexed16: {
+    uint32_t pos0 = (uint32_t)y * w + (uint32_t)x0;
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t pos = pos0 + i;
+      uint32_t byte = pos >> 1, ix = 1 - (pos & 0x1);
+      data[byte] = (uint8_t)((uint8_t)(data[byte] & ~indexed16_mask[ix]) | (uint8_t)(c << indexed16_shift[ix]));
+    }
+    break;
+  }
+  case rgb332: {
+    uint32_t pos = (uint32_t)y * w + (uint32_t)x0;
+    memset(data + pos, rgb888to332(c), n);
+    break;
+  }
+  case rgb565: {
+    uint16_t color = rgb888to565(c);
+    uint8_t hi = (uint8_t)(color >> 8), lo = (uint8_t)color;
+    uint32_t pos = (uint32_t)y * (w << 1) + ((uint32_t)x0 << 1);
+    uint8_t *dp = data + pos;
+    for (uint32_t i = 0; i < n; i++) {
+      dp[0] = hi;
+      dp[1] = lo;
+      dp += 2;
+    }
+    break;
+  }
+  case rgb888: {
+    uint8_t b0 = (uint8_t)(c >> 16), b1 = (uint8_t)(c >> 8), b2 = (uint8_t)c;
+    uint32_t pos = (uint32_t)y * (w * 3) + ((uint32_t)x0 * 3);
+    uint8_t *dp = data + pos;
+    for (uint32_t i = 0; i < n; i++) {
+      dp[0] = b0;
+      dp[1] = b1;
+      dp[2] = b2;
+      dp += 3;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+static void v_line(image_buffer_t* img, int x, int y, int len, uint32_t c) {
+  if (len <= 0) return;
+  if (x < 0 || x >= img->width) return;
+  int y0 = y;
+  int y1 = y + len - 1;
+  if (y0 < 0) y0 = 0;
+  if (y1 >= img->height) y1 = img->height - 1;
+  if (y0 > y1) return;
+  int n = y1 - y0 + 1;
+  int w = img->width;
+  uint8_t *data = img->data;
+
+  switch (img->fmt) {
+  case indexed2: {
+    for (int i = 0; i < n; i++) {
+      uint32_t pos = (uint32_t)(y0 + i) * w + (uint32_t)x;
+      uint32_t byte = pos >> 3, bit = 7 - (pos & 7);
+      if (c) data[byte] |= (uint8_t)(1 << bit);
+      else data[byte] &= (uint8_t)~(1 << bit);
+    }
+    break;
+  }
+  case indexed4: {
+    for (int i = 0; i < n; i++) {
+      uint32_t pos = (uint32_t)(y0 + i) * w + (uint32_t)x;
+      uint32_t byte = pos >> 2, ix = 3 - (pos & 0x3);
+      data[byte] = (uint8_t)((uint8_t)(data[byte] & ~indexed4_mask[ix]) | (uint8_t)(c << indexed4_shift[ix]));
+    }
+    break;
+  }
+  case indexed16: {
+    for (int i = 0; i < n; i++) {
+      uint32_t pos = (uint32_t)(y0 + i) * w + (uint32_t)x;
+      uint32_t byte = pos >> 1, ix = 1 - (pos & 0x1);
+      data[byte] = (uint8_t)((uint8_t)(data[byte] & ~indexed16_mask[ix]) | (uint8_t)(c << indexed16_shift[ix]));
+    }
+    break;
+  }
+  case rgb332: {
+    uint8_t col = rgb888to332(c);
+    uint32_t pos = (uint32_t)y0 * w + (uint32_t)x;
+    for (int i = 0; i < n; i++) {
+      data[pos] = col;
+      pos += w;
+    }
+    break;
+  }
+  case rgb565: {
+    uint16_t color = rgb888to565(c);
+    uint8_t hi = (uint8_t)(color >> 8), lo = (uint8_t)color;
+    uint32_t stride = (uint32_t)w << 1;
+    uint32_t pos = (uint32_t)y0 * stride + ((uint32_t)x << 1);
+    for (int i = 0; i < n; i++) {
+      data[pos] = hi;
+      data[pos + 1] = lo;
+      pos += stride;
+    }
+    break;
+  }
+  case rgb888: {
+    uint8_t b0 = (uint8_t)(c >> 16), b1 = (uint8_t)(c >> 8), b2 = (uint8_t)c;
+    uint32_t stride = (uint32_t)w * 3;
+    uint32_t pos = (uint32_t)y0 * stride + ((uint32_t)x * 3);
+    for (int i = 0; i < n; i++) {
+      data[pos] = b0;
+      data[pos + 1] = b1;
+      data[pos + 2] = b2;
+      pos += stride;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+#else
 static void h_line(image_buffer_t* img, int x, int y, int len, uint32_t c) {
   for (int i = 0; i < len; i ++) {
     putpixel(img, x+i, y, c);
@@ -669,6 +905,7 @@ static void v_line(image_buffer_t* img, int x, int y, int len, uint32_t c) {
     putpixel(img, x, y+i, c);
   }
 }
+#endif // USE_EFFICIENT_HLINE_VLINE
 
 static void fill_circle(image_buffer_t *img, int x, int y, int radius, uint32_t color) {
   switch (radius) {
@@ -1002,7 +1239,7 @@ static void generic_arc(image_buffer_t *img, int x, int y, int rad, float ang_st
   float px = px_start;
   float py = py_start;
 
-  for (int i = 0;i < steps;i++) {
+  for (int i = 0;i < (int)steps;i++) {
     float px_before = px;
     float py_before = py;
 
@@ -1313,9 +1550,6 @@ static void handle_arc_slice(image_buffer_t *img, int outer_x, int outer_y, int 
                                         0, 0,
                                         outer_x1, outer_y1);
 
-    // TODO: look into this:
-    // end_is_past0!=0 is always true.
-    // end_is_part1!=0 is always true.
     bool slice_overlaps0 = start_is_past0 != end_is_past0
       && (start_is_past0 != 0 || end_is_past0 != 0);
     bool slice_overlaps1 = start_is_past1 != end_is_past1
@@ -1708,8 +1942,9 @@ static void arc(image_buffer_t *img, int c_x, int c_y, int radius, float angle0,
   }
 }
 
+// orient: 0=normal, 1=up(90°CCW), 2=180°, 3=down(90°CW)
 static void img_putc(image_buffer_t *img, int x, int y, uint32_t *colors, int num_colors,
-                     uint8_t *font_data, uint8_t ch, bool up, bool down) {
+                     uint8_t *font_data, uint8_t ch, int orient, float mag) {
   uint8_t w = font_data[0];
   uint8_t h = font_data[1];
   uint8_t char_num = font_data[2];
@@ -1721,7 +1956,6 @@ static void img_putc(image_buffer_t *img, int x, int y, uint32_t *colors, int nu
     bytes_per_char += 1;
   }
 
-  // There are some expectations on ch that are not documented here.
   if (char_num == 10) {
     ch = (uint8_t)(ch - '0');
   } else {
@@ -1732,51 +1966,45 @@ static void img_putc(image_buffer_t *img, int x, int y, uint32_t *colors, int nu
     return;
   }
 
-  if (bits_per_pixel == 2) {
-    if (num_colors < 4) {
-      return;
-    }
+  for (int i = 0; i < w * h; i++) {
+    int x0 = i % w;
+    int y0 = i / w;
 
-    for (int i = 0; i < w * h; i++) {
+    int sx0 = (int)floorf((float)x0 * mag);
+    int sx1 = (int)floorf((float)(x0 + 1) * mag) - 1;
+    int sy0 = (int)floorf((float)y0 * mag);
+    int sy1 = (int)floorf((float)(y0 + 1) * mag) - 1;
+
+    if (sx1 < sx0) sx1 = sx0;
+    if (sy1 < sy0) sy1 = sy0;
+
+    uint32_t color;
+    if (bits_per_pixel == 2) {
+      if (num_colors < 4) return;
       uint8_t byte = font_data[4 + bytes_per_char * ch + (i / 4)];
       uint8_t bit_pos = (uint8_t)(i % pixels_per_byte);
       uint8_t pixel_value = (byte >> (bit_pos * 2)) & 0x03;
-      int x0 = i % w;
-      int y0 = i / w;
-      if (up) {
-        putpixel(img, x + y0, y - x0, colors[pixel_value]);
-      } else if (down) {
-        putpixel(img, x - y0, y + x0, colors[pixel_value]);
-      } else {
-        putpixel(img, x + x0, y + y0, colors[pixel_value]);
-      }
-    }
-  } else {
-    if (num_colors < 1) {
-      return;
-    }
-
-    int32_t fg = (int32_t)colors[0];
-    int32_t bg = -1;
-
-    if (num_colors > 1) {
-      bg = (int32_t)colors[1];
-    }
-
-    for (int i = 0; i < w * h; i++) {
+      color = colors[pixel_value];
+    } else {
+      if (num_colors < 1) return;
+      int32_t fg = (int32_t)colors[0];
+      int32_t bg = (num_colors > 1) ? (int32_t)colors[1] : -1;
       uint8_t byte = font_data[4 + bytes_per_char * ch + (i / 8)];
       uint8_t bit_pos = (uint8_t)(i % 8);
       uint8_t bit = (uint8_t)(byte & (1 << bit_pos));
-      if (bit || bg >= 0) {
-        int x0 = i % w;
-        int y0 = i / w;
+      if (!bit && bg < 0) {
+        continue;
+      }
+      color = bit ? (uint32_t)fg : (uint32_t)bg;
+    }
 
-        if (up) {
-          putpixel(img, x + y0, y - x0, bit ? (uint32_t)fg : (uint32_t)bg);
-        } else if (down) {
-          putpixel(img, x - y0, y + x0, bit ? (uint32_t)fg : (uint32_t)bg);
-        } else {
-          putpixel(img, x + x0, y + y0, bit ? (uint32_t)fg : (uint32_t)bg);
+    for (int py = sy0; py <= sy1; py++) {
+      for (int px = sx0; px <= sx1; px++) {
+        switch (orient) {
+          case 1:  putpixel(img, x + py, y - px, color); break;
+          case 2:  putpixel(img, x - px, y - py, color); break;
+          case 3:  putpixel(img, x - py, y + px, color); break;
+          default: putpixel(img, x + px, y + py, color); break;
         }
       }
     }
@@ -1901,7 +2129,7 @@ void blit(
 // Extensions
 
 #define ATTR_MAX_ARGS	4
-#define ARG_MAX_NUM		8
+#define ARG_MAX_NUM	8
 
 typedef struct {
   bool is_valid;
@@ -1949,7 +2177,7 @@ static img_args_t decode_args(lbm_value *args, lbm_uint argn, int num_expected) 
         res.args[num_dec] = args[i];
         num_dec++;
 
-        if (num_dec > ARG_MAX_NUM) {
+        if (num_dec >= ARG_MAX_NUM) {
           return res;
         }
       } else {
@@ -2596,105 +2824,128 @@ static lbm_value ext_triangle(lbm_value *args, lbm_uint argn) {
   return ENC_SYM_TRUE;
 }
 
-// lisp args: img x y fg bg font str
+// lisp args:
+//   img x y fg bg font str  [attrs] ['up|'down]
+//   img x y fg bg str       [attrs] ['up|'down]   uses built-in retro5x7 font
+//   img x y '(c0..c3) font str [attrs] ['up|'down]  4-color form for 2bpp fonts
+// attrs: '(magnify N) '(scale N) '(spacing N) '(align 'left|'center|'right) '(rotate deg)
+// orient: 0=normal 1=up/90CCW 2=180 3=down/90CW
 static lbm_value ext_text(lbm_value *args, lbm_uint argn) {
-  bool up = false;
-  bool down = false;
+  int orient = 0;
 
-  if (argn >= 7 && lbm_is_symbol(args[argn - 1])) {
-    if (lbm_dec_sym(args[argn - 1]) == symbol_up) {
-      up = true;
-      argn--;
-    }
-
-    if (lbm_dec_sym(args[argn - 1]) == symbol_down) {
-      down = true;
-      argn--;
-    }
+  if (argn >= 6 && lbm_is_symbol(args[argn - 1])) {
+    lbm_uint sym = lbm_dec_sym(args[argn - 1]);
+    if (sym == symbol_up)   { orient = 1; argn--; }
+    if (sym == symbol_down) { orient = 3; argn--; }
   }
 
-  if (argn != 6 && argn != 7) {
-    return ENC_SYM_TERROR;
+  if (argn < 6) return ENC_SYM_TERROR;
+
+  float txt_mag = 1.0f;
+  int spacing = 0;
+  int align   = 0;
+  int rot_deg = 0;
+
+  lbm_uint core_argn = argn;
+  while (core_argn > 0) {
+    int r = parse_text_attr(args[core_argn - 1], &txt_mag, &spacing, &align, &rot_deg);
+    if (r == 1) { core_argn--; continue; }
+    if (r < 0)  { return ENC_SYM_TERROR; }
+    break;
+  }
+
+  if (core_argn < 6 || core_argn > 7) return ENC_SYM_TERROR;
+
+  if (rot_deg != 0) {
+    orient = (((rot_deg % 360) + 360) % 360) / 90;
   }
 
   int x = lbm_dec_as_i32(args[1]);
   int y = lbm_dec_as_i32(args[2]);
 
-  int32_t colors[4] = {-1, -1, -1, -1}; // how big? int vs int32
-  if (argn == 7) {
-    if (!lbm_is_number(args[3]) || !lbm_is_number(args[4])) {
-      return ENC_SYM_TERROR;
+  int32_t colors[4] = {-1, -1, -1, -1};
+  uint8_t *font_data = (uint8_t*)retro5x7;
+  char *txt = NULL;
+
+  if (lbm_is_cons(args[3])) {
+    // color list form: img x y '(c0..cN) font str
+    if (core_argn != 6) return ENC_SYM_TERROR;
+    lbm_value curr = args[3];
+    int ci = 0;
+    while (lbm_is_cons(curr) && ci < 4) {
+      lbm_value a = lbm_car(curr);
+      if (!lbm_is_number(a)) return ENC_SYM_TERROR;
+      colors[ci++] = lbm_dec_as_i32(a);
+      curr = lbm_cdr(curr);
     }
+    if (lbm_type_of_functional(args[4]) == LBM_TYPE_ARRAY) {
+      lbm_array_header_t *fh = (lbm_array_header_t*)lbm_car(args[4]);
+      if (fh->size < 4) return ENC_SYM_TERROR;
+      uint8_t *fd = (uint8_t*)fh->data;
+      uint32_t need = ((uint32_t)fd[0] * fd[1] * fd[2] * fd[3] + 7) / 8;
+      if (fh->size - 4 < need) return ENC_SYM_TERROR;
+      font_data = fd;
+    }
+    txt = lbm_dec_str(args[5]);
+  } else if (lbm_is_number(args[3]) && lbm_is_number(args[4])) {
     colors[0] = lbm_dec_as_i32(args[3]);
     colors[1] = lbm_dec_as_i32(args[4]);
-  } else {
-    lbm_value curr = args[3];
-    int ind = 0;
-    while (lbm_is_cons(curr)) {
-      lbm_value  arg = lbm_car(curr);
-      if (lbm_is_number(arg)) {
-        colors[ind++] = lbm_dec_as_i32(arg);
+    if (core_argn == 7) {
+      if (lbm_type_of_functional(args[5]) == LBM_TYPE_ARRAY) {
+        lbm_array_header_t *fh = (lbm_array_header_t*)lbm_car(args[5]);
+        if (fh->size < 4) return ENC_SYM_TERROR;
+        uint8_t *fd = (uint8_t*)fh->data;
+        uint32_t need = ((uint32_t)fd[0] * fd[1] * fd[2] * fd[3] + 7) / 8;
+        if (fh->size - 4 < need) return ENC_SYM_TERROR;
+        font_data = fd;
       } else {
         return ENC_SYM_TERROR;
       }
-
-      if (ind == 4) {
-        break;
-      }
-
-      curr = lbm_cdr(curr);
+      txt = lbm_dec_str(args[6]);
+    } else {
+      txt = lbm_dec_str(args[5]);
     }
-  }
-
-  if (!array_is_image_buffer(args[0])) {
-  return ENC_SYM_TERROR;
-  }
-  lbm_array_header_t *arr = (lbm_array_header_t *)lbm_car(args[0]);
-  image_buffer_t img_buf;
-  img_buf.width = image_buffer_width((uint8_t*)arr->data);
-  img_buf.height = image_buffer_height((uint8_t*)arr->data);
-  img_buf.fmt = image_buffer_format((uint8_t*)arr->data);
-  img_buf.mem_base = (uint8_t*)arr->data;
-  img_buf.data = image_buffer_data((uint8_t*)arr->data);
-
-  lbm_array_header_t *font = 0;
-  // Allow both const and non-const fonts.
-  if (lbm_type_of_functional(args[argn - 2]) == LBM_TYPE_ARRAY) {
-    font = (lbm_array_header_t *)lbm_car(args[argn - 2]);
-  }
-
-  char *txt = lbm_dec_str(args[argn - 1]);
-
-  if (!font || !txt || font->size < (4 + 5 * 5 * 10)) {
+  } else {
     return ENC_SYM_TERROR;
   }
 
-  uint8_t *font_data = (uint8_t*)font->data;
+  if (!txt) return ENC_SYM_TERROR;
+
+  if (!array_is_image_buffer(args[0])) return ENC_SYM_TERROR;
+  lbm_array_header_t *arr = (lbm_array_header_t *)lbm_car(args[0]);
+  image_buffer_t img_buf;
+  img_buf.width    = image_buffer_width((uint8_t*)arr->data);
+  img_buf.height   = image_buffer_height((uint8_t*)arr->data);
+  img_buf.fmt      = image_buffer_format((uint8_t*)arr->data);
+  img_buf.mem_base = (uint8_t*)arr->data;
+  img_buf.data     = image_buffer_data((uint8_t*)arr->data);
+
   uint8_t w = font_data[0];
-  uint8_t h = font_data[1];
 
-  int incx = 1;
-  int incy = 0;
-  if (up) {
-    incx = 0;
-    incy = -1;
-  } else if (down) {
-    incx = 0;
-    incy = 1;
-  }
+  static const int8_t incx_tbl[4] = { 1,  0, -1,  0};
+  static const int8_t incy_tbl[4] = { 0, -1,  0,  1};
+  int incx = incx_tbl[orient];
+  int incy = incy_tbl[orient];
 
-  int ind = 0;
-  while (txt[ind] != 0) {
+  float char_step_f = (float)w * txt_mag + (float)spacing;
+  int char_step = (int)lroundf(char_step_f);
+  int txt_len      = (int)strlen(txt);
+  int total        = (int)lroundf((float)txt_len * char_step_f - (float)spacing);
+  int align_offset = (align == 1) ? total / 2 : (align == 2) ? total : 0;
+
+  int x0 = x - align_offset * incx;
+  int y0 = y - align_offset * incy;
+
+  for (int ind = 0; txt[ind] != 0; ind++) {
     img_putc(&img_buf,
-      x + ind * ((up || down) ? h : w) * incx,
-      y + ind * ((up || down) ? w : h) * incy,
+      x0 + ind * char_step * incx,
+      y0 + ind * char_step * incy,
       (uint32_t *)colors,
       4,
       font_data,
       (uint8_t)txt[ind],
-      up,
-      down);
-    ind++;
+      orient,
+      txt_mag);
   }
 
   return ENC_SYM_TRUE;
@@ -2924,7 +3175,7 @@ static lbm_value ext_disp_render_jpg(lbm_value *args, lbm_uint argn) {
     iodev.pos = 0;
     iodev.ofs_x = lbm_dec_as_i32(args[1]);
     iodev.ofs_y = lbm_dec_as_i32(args[2]);
-    jd_prepare(&jd, jpg_input_func, jdwork, sz_work + IMAGE_BUFFER_HEADER_SIZE, &iodev);
+    jd_prepare(&jd, jpg_input_func, jdwork, sz_work, &iodev);
     jd_decomp(&jd, jpg_output_func, 0);
     lbm_free(jdwork);
     res = ENC_SYM_TRUE;

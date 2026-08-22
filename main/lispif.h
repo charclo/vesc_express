@@ -26,18 +26,25 @@
 #include <stddef.h>
 #include "lispbm.h"
 
+#define NATIVE_LIB_MAGIC 0xCAFEBABE
+#define NATIVE_LIB_RELOC_MAGIC 0xCAFEBABF
+
 // Functions
 void lispif_init(void);
 int lispif_get_restart_cnt(void);
 void lispif_lock_lbm(void);
 void lispif_unlock_lbm(void);
 void lispif_stop(void);
-bool lispif_restart(bool print, bool load_code, bool load_imports);
+void lispif_stop_lib(void);
+bool lispif_restart(bool print, bool load_code);
 void lispif_disable_all_events(void);
 void lispif_free(void *ptr);
 void lispif_process_cmd(unsigned char *data, unsigned int len,
 		void(*reply_func)(unsigned char *data, unsigned int len));
 void lispif_process_can(uint32_t can_id, uint8_t *data8, int len, bool is_ext);
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+void lispif_process_can2(uint32_t can_id, uint8_t *data8, int len, bool is_ext);
+#endif
 void lispif_process_custom_app_data(unsigned char *data, unsigned int len);
 void lispif_process_rmsg(int slot, unsigned char *data, unsigned int len);
 void lispif_add_ext_load_callback(void (*p_func)(bool));
@@ -47,5 +54,9 @@ bool lispif_is_eval_task(void);
 void lispif_load_vesc_extensions(bool main_found);
 char* lispif_print_prefix(void);
 char* lispif_fw_name(void);
+
+esp_err_t lispif_i2c_tx_rx(uint8_t addr,
+		const uint8_t* write_buffer, size_t write_size,
+		uint8_t* read_buffer, size_t read_size);
 
 #endif /* LISPBM_LISPIF_H_ */

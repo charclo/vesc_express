@@ -21,17 +21,24 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
-static atomic_uint_least32_t timestamp_cache = ATOMIC_VAR_INIT(0);
+static atomic_uint_least32_t timestamp_cache   = ATOMIC_VAR_INIT(0);
+static atomic_int            timestamp_running  = ATOMIC_VAR_INIT(0);
 
-void *timestamp_cacher(void *v) {
-  while(true) {
+void lbm_timestamp_cacher(void *v) {
+  (void)v;
+  atomic_store(&timestamp_running, 1);
+  while(atomic_load(&timestamp_running)) {
     struct timeval tv;
     gettimeofday(&tv,NULL);
     atomic_store(&timestamp_cache, (uint32_t)(tv.tv_sec * 1000000 + tv.tv_usec));
-    sleep_callback(100);
+    Sleep(1); // Sleep for 1ms (Windows Sleep takes milliseconds)
   }
 }
 
-uint32_t timestamp(void) {
+void lbm_timestamp_cacher_stop(void) {
+  atomic_store(&timestamp_running, 0);
+}
+
+uint32_t lbm_timestamp(void) {
   return (uint32_t)atomic_load(&timestamp_cache);
 }

@@ -22,6 +22,19 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include "sdkconfig.h"
+
+#if !CONFIG_BT_BLUEDROID_ENABLED
+
+typedef enum {
+	CUSTOM_BLE_DISABLED = 0,
+} custom_ble_result_t;
+
+void custom_ble_init(void);
+bool custom_ble_started(void);
+
+#else
 
 #include "esp_bt_defs.h"
 #include "esp_gatt_defs.h"
@@ -361,5 +374,8 @@ bool custom_ble_started();
 void custom_ble_init();
 
 extern esp_ble_adv_params_t ble_adv_params;
+
+
+#endif
 
 #endif /* MAIN_BLE_CUSTOM_BLE_H_ */

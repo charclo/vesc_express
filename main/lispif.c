@@ -34,11 +34,12 @@
 #include "lbm_image.h"
 #include "esp_partition.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 
 #define GC_STACK_SIZE			160
 #define PRINT_STACK_SIZE		128
 #ifndef EXTENSION_STORAGE_SIZE
-#define EXTENSION_STORAGE_SIZE	350
+#define EXTENSION_STORAGE_SIZE	390
 #endif
 #ifndef USER_EXTENSION_STORAGE_SIZE
 #define USER_EXTENSION_STORAGE_SIZE 0
@@ -55,14 +56,9 @@ static uint32_t *memory_array;
 static uint32_t *bitmap_array;
 static lbm_extension_t extension_storage[EXTENSION_STORAGE_SIZE + USER_EXTENSION_STORAGE_SIZE];
 
+static bool string_tok_valid = false;
 static volatile lbm_uint *image_ptr = 0;
 static int image_max_ind = 0;
-
-static lbm_string_channel_state_t string_tok_state;
-static lbm_char_channel_t string_tok;
-static lbm_buffered_channel_state_t buffered_tok_state;
-static lbm_char_channel_t buffered_string_tok;
-static bool string_tok_valid = false;
 
 static TaskHandle_t eval_task = 0;
 static volatile bool lisp_thd_running = false;
@@ -102,11 +98,34 @@ extern lbm_const_heap_t *lbm_const_heap_state;
 #define LBM_MEMORY_SIZE_KB(kb) LBM_MEMORY_SIZE_64BYTES_TIMES_X((kb * 16))
 #define LBM_BITMAP_SIZE_KB(kb) LBM_MEMORY_BITMAP_SIZE((kb * 16))
 
+#ifdef CONFIG_IDF_TARGET_ESP32P4
+#define LBM_PSRAM_HEAP_BYTES   (4096 * 32)
+#define LBM_PSRAM_MEMORY_KB    2048
+#define LBM_PSRAM_BITMAP_KB    2048
+#else
+#define LBM_PSRAM_HEAP_BYTES   (4096 * 16)
+#define LBM_PSRAM_MEMORY_KB    512
+#define LBM_PSRAM_BITMAP_KB    512
+#endif
+
+
 void lispif_init(void) {
+#ifndef CONFIG_SPIRAM
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+	heap_size = (4096 + 512);
+	mem_size = LBM_MEMORY_SIZE_KB(48);
+	bitmap_size = LBM_BITMAP_SIZE_KB(48);
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
 	heap_size = (2048 + 512);
 	mem_size = LBM_MEMORY_SIZE_KB(32);
 	bitmap_size = LBM_BITMAP_SIZE_KB(32);
-
+#elif CONFIG_IDF_TARGET_ESP32P4
+	heap_size = (4096 + 512);
+	mem_size = LBM_MEMORY_SIZE_KB(32);
+	bitmap_size = LBM_BITMAP_SIZE_KB(32);
+#else
+	#error "Unsupported target"
+#endif
 	if (backup.config.wifi_mode == WIFI_MODE_DISABLED &&
 			backup.config.ble_mode == BLE_MODE_DISABLED) {
 		heap_size *= 2;
@@ -118,14 +137,29 @@ void lispif_init(void) {
 		mem_size = LBM_MEMORY_SIZE_KB(64);
 		bitmap_size = LBM_BITMAP_SIZE_KB(64);
 	}
+#endif
 
+#ifdef CONFIG_SPIRAM
+	heap_size = LBM_PSRAM_HEAP_BYTES / sizeof(lbm_cons_t);
+	heap = heap_caps_aligned_alloc(8, heap_size * sizeof(lbm_cons_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	mem_size = LBM_MEMORY_SIZE_KB(LBM_PSRAM_MEMORY_KB);
+	bitmap_size = LBM_BITMAP_SIZE_KB(LBM_PSRAM_BITMAP_KB);
+	memory_array = heap_caps_malloc(mem_size * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+	bitmap_array = heap_caps_malloc(bitmap_size * sizeof(uint32_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
 	heap = memalign(8, heap_size * sizeof(lbm_cons_t));
-	memory_array = heap_caps_malloc(mem_size * sizeof(uint32_t), MALLOC_CAP_DMA);
-	bitmap_array = heap_caps_malloc(bitmap_size * sizeof(uint32_t), MALLOC_CAP_DMA);
+	memory_array = heap_caps_malloc(mem_size * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+	bitmap_array = heap_caps_malloc(bitmap_size * sizeof(uint32_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+#endif
 
-	memset(&buffered_tok_state, 0, sizeof(buffered_tok_state));
+	if (!heap || !memory_array || !bitmap_array) {
+		commands_printf_lisp("LispBM malloc failed: heap=%p mem=%p bmp=%p (free heap: %u)",
+				heap, memory_array, bitmap_array,
+				(unsigned)esp_get_free_heap_size());
+	}
+
 	lbm_mutex = xSemaphoreCreateMutex();
-	lispif_restart(false, true, true);
+	lispif_restart(false, true);
 
 #ifdef LBM_USE_TIME_QUOTA
 	lbm_set_eval_time_quota(2000);
@@ -217,7 +251,7 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 		if (!running) {
 			ok = pause_eval(0, 2000);
 		} else {
-			ok = lispif_restart(true, true, true);
+			ok = lispif_restart(true, true);
 		}
 
 		int32_t ind = 0;
@@ -323,7 +357,7 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 		}
 
 		if (!lisp_thd_running) {
-			lispif_restart(true, false, true);
+			lispif_restart(true, false);
 		}
 
 		if (lisp_thd_running) {
@@ -402,8 +436,8 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 				commands_printf_lisp("Extensions: %u, max %u\n", lbm_get_num_extensions(), lbm_get_max_extensions());
 				commands_printf_lisp("--(Flash)--\n");
 				int32_t image_size = lbm_image_get_size() - lbm_image_get_write_index();
-				commands_printf_lisp("Size       : %d\n", 512 * 1024);
-				commands_printf_lisp("Imports    : %d\n", (128 * 1024 - lbm_image_get_size()) * 4);
+				commands_printf_lisp("Size       : %d\n", flash_helper_code_size_raw(CODE_IND_LISP));
+				commands_printf_lisp("Imports    : %d\n", flash_helper_code_size_raw(CODE_IND_LISP) - lbm_image_get_size() * 4);
 				commands_printf_lisp("Const Heap : %d\n", lbm_const_heap_state->next * 4);
 				commands_printf_lisp("Image      : %d\n", image_size * 4);
 				commands_printf_lisp("Free       : %d\n", (lbm_image_get_size() - lbm_const_heap_state->next - image_size) * 4);
@@ -477,7 +511,7 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 				}
 			} else if (strncmp(str, ":reset", 6) == 0) {
 				lispif_unlock_lbm();
-				commands_printf_lisp(lispif_restart(true, flash_helper_code_size(CODE_IND_LISP) > 0, true) ?
+				commands_printf_lisp(lispif_restart(true, flash_helper_code_size(CODE_IND_LISP) > 0) ?
 						"Reset OK\n\n" : "Reset Failed\n\n");
 				lispif_lock_lbm();
 			} else if (strncmp(str, ":pause", 6) == 0) {
@@ -526,11 +560,14 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 				if (pause_eval(30, 1000)) {
 					repl_buffer = lbm_malloc_reserve(len);
 					if (repl_buffer) {
+						static lbm_string_channel_state_t string_tok_state;
+						static lbm_char_channel_t string_tok;
+
 						memcpy(repl_buffer, data, len);
 						lbm_create_string_char_channel(&string_tok_state, &string_tok, repl_buffer);
 						repl_cid = lbm_load_and_eval_expression(&string_tok);
 						repl_cid_for_buffer = repl_cid;
-						lbm_image_save_constant_heap_ix();
+						//lbm_image_save_constant_heap_ix();
 						lbm_continue_eval();
 
 						if (reply_func != NULL) {
@@ -552,6 +589,9 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 	} break;
 
 	case COMM_LISP_STREAM_CODE: {
+		static lbm_buffered_channel_state_t buffered_tok_state = {0};
+		static lbm_char_channel_t buffered_string_tok = {0};
+
 		int32_t ind = 0;
 		int32_t offset = buffer_get_int32(data, &ind);
 		int32_t tot_len = buffer_get_int32(data, &ind);
@@ -562,11 +602,11 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 
 		if (offset == 0) {
 			if (!lisp_thd_running) {
-				lispif_restart(true, restart == 2 ? true : false, true);
+				lispif_restart(true, restart == 2 ? true : false);
 			} else if (restart == 1) {
-				lispif_restart(true, false, true);
+				lispif_restart(true, false);
 			} else if (restart == 2) {
-				lispif_restart(true, true, true);
+				lispif_restart(true, true);
 			}
 		}
 
@@ -673,7 +713,7 @@ void lispif_process_cmd(unsigned char *data, unsigned int len,
 		if (ind == (int32_t)len) {
 			if ((offset + written) == tot_len) {
 				lbm_channel_writer_close(&buffered_string_tok);
-				lbm_image_save_constant_heap_ix();
+				//lbm_image_save_constant_heap_ix();
 				string_tok_valid = false;
 				offset_last = -1;
 				commands_printf_lisp("Stream done, starting...");
@@ -727,7 +767,7 @@ static void done_callback(eval_context_t *ctx) {
 	}
 
 	if (cid == main_cid) {
-		lbm_image_save_constant_heap_ix();
+		//lbm_image_save_constant_heap_ix();
 		main_cid = -1;
 	}
 }
@@ -736,6 +776,8 @@ void lispif_stop(void) {
 	if (!lisp_thd_running) {
 		return;
 	}
+
+	lispif_stop_lib();
 
 	lispif_lock_lbm();
 
@@ -759,7 +801,7 @@ void lispif_stop(void) {
 	lispif_unlock_lbm();
 }
 
-bool lispif_restart(bool print, bool load_code, bool load_imports) {
+bool lispif_restart(bool print, bool load_code) {
 	bool res = false;
 
 	restart_cnt++;
@@ -781,7 +823,7 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 		lispif_stop();
 
 		if (save_heap) {
-			lbm_image_save_constant_heap_ix();
+			//lbm_image_save_constant_heap_ix();
 		}
 
 		int code_chars = 0;
@@ -800,11 +842,18 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 			image_len /= sizeof(lbm_uint);
 			image_len &= 0xFFFFFFF0;
 
-			lbm_init(heap, heap_size, memory_array, mem_size, bitmap_array,
+			bool lbm_ok = lbm_init(heap, heap_size, memory_array, mem_size, bitmap_array,
 					bitmap_size,
 					GC_STACK_SIZE,
 					PRINT_STACK_SIZE, extension_storage,
 					EXTENSION_STORAGE_SIZE + USER_EXTENSION_STORAGE_SIZE);
+
+			if (!lbm_ok) {
+				commands_printf_lisp("lbm_init failed (heap=%p mem=%p bmp=%p free=%u)",
+						heap, memory_array, bitmap_array,
+						(unsigned)esp_get_free_heap_size());
+				return false;
+			}
 
 			lbm_set_usleep_callback(sleep_callback);
 			lbm_set_printf_callback(commands_printf_lisp);
@@ -820,9 +869,6 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 				running_app_info.app_elf_sha256[0], running_app_info.app_elf_sha256[1], running_app_info.app_elf_sha256[2], running_app_info.app_elf_sha256[3],
 				running_app_info.app_elf_sha256[4], running_app_info.app_elf_sha256[5], running_app_info.app_elf_sha256[6], running_app_info.app_elf_sha256[7]);
 
-			bool load_imports_before = load_imports;
-			load_imports = false;
-
 			if (!lbm_image_exists() || strcmp(lbm_image_get_version(), ver_str) != 0) {
 				commands_printf_lisp("Preparing new image...");
 				for (uint32_t i = 0; i < image_len;i++) {
@@ -830,7 +876,6 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 				}
 				image_max_ind = 0;
 				lbm_image_create(ver_str);
-				load_imports = load_imports_before;
 				new_image_created = true;
 			}
 
@@ -873,30 +918,14 @@ bool lispif_restart(bool print, bool load_code, bool load_imports) {
 			ext_load_callbacks[i](main_found);
 		}
 
-		if (load_imports) {
-			if (code_len > code_chars + 3) {
-				int32_t ind = code_chars + 1;
-				uint16_t num_imports = buffer_get_uint16((uint8_t*)code_data, &ind);
-
-				if (num_imports > 0 && num_imports < 500) {
-					for (int i = 0;i < num_imports;i++) {
-						char *name = code_data + ind;
-						ind += strlen(name) + 1;
-						int32_t offset = buffer_get_int32((uint8_t*)code_data, &ind);
-						int32_t len = buffer_get_int32((uint8_t*)code_data, &ind);
-
-						lbm_value val;
-						if (lbm_share_array_const(&val, code_data + offset, len)) {
-							lbm_define(name, val);
-						}
-					}
-				}
-
-				lbm_image_save_global_env();
-			}
-		}
+		// Bundled imports are now bound lazily by ext_import (import extension)
+		// each time an (import "path" 'sym) line actually evaluates, instead
+		// of once here up front.
 
 		if (load_code) {
+			static lbm_string_channel_state_t string_tok_state;
+			static lbm_char_channel_t string_tok;
+
 			if (print) {
 				if (main_found) {
 					commands_printf_lisp("Running main-function");

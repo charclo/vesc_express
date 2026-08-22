@@ -18,11 +18,19 @@
 #ifndef PLATFORM_TIMESTAMP_H_
 #define PLATFORM_TIMESTAMP_H_
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#if defined(ESP_PLATFORM)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#else
+#include <FreeRTOS.h>
+#include <task.h>
+#endif
 #include <stdint.h>
 
 // timestamp interface
-extern uint32_t timestamp(void);
+static inline uint32_t lbm_timestamp(void) {
+  TickType_t t = xTaskGetTickCount();
+  return (uint32_t) ((1000 / portTICK_PERIOD_MS) * t);
+}
 
 #endif

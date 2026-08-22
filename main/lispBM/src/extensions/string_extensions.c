@@ -1,5 +1,5 @@
 /*
-    Copyright 2022, 2023 - 2025 Joel Svensson        svenssonjoel@yahoo.se
+    Copyright 2022, 2023 - 2026 Joel Svensson        svenssonjoel@yahoo.se
     Copyright 2022, 2023        Benjamin Vedder
     Copyright              2024 Rasmus Söderhielm    rasmus.soderhielm@gmail.com
 
@@ -47,25 +47,6 @@ static lbm_uint sym_left;
 static lbm_uint sym_case_insensitive;
 
 
-static size_t strlen_max(const char *s, size_t maxlen) {
-  size_t i;
-  for (i = 0; i < maxlen; i ++) {
-    if (s[i] == 0) break;
-  }
-  return i;
-}
-
-static bool dec_str_size(lbm_value v, char **data, size_t *size) {
-  bool result = false;
-  lbm_array_header_t *array = lbm_dec_array_r(v);
-  if (array) {
-      *data = (char*)array->data;
-      *size = array->size;
-      result = true;
-  }
-  return result;
-}
-
 static lbm_value ext_str_from_n(lbm_value *args, lbm_uint argn) {
   if (argn != 1 && argn != 2) {
     lbm_set_error_reason((char*)lbm_error_str_num_args);
@@ -106,15 +87,7 @@ static lbm_value ext_str_from_n(lbm_value *args, lbm_uint argn) {
 
   len = MIN(len, sizeof(buffer));
 
-  lbm_value res;
-  if (lbm_create_array(&res, len + 1)) {
-    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(res);
-    memcpy(arr->data, buffer, len);
-    ((char*)(arr->data))[len] = '\0';
-    return res;
-  } else {
-    return ENC_SYM_MERROR;
-  }
+  return span_to_lbm(buffer, len);
 }
 
 // signature: (str-join strings [delim]) -> str
@@ -134,11 +107,13 @@ static lbm_value ext_str_join(lbm_value *args, lbm_uint argn) {
     lbm_set_error_suspect(args[0]);
     return ENC_SYM_TERROR;
   }
-  for (lbm_value current = args[0]; lbm_is_cons(current); current = lbm_cdr(current)) {
-    lbm_value car_val = lbm_car(current);
+  lbm_value current = args[0];
+  while (lbm_is_cons(current)) {
+    lbm_cons_t *cell = lbm_ref_cell(current);
+    lbm_value car_val = cell->car;
     char *str = NULL;
     size_t arr_size = 0;
-    if (dec_str_size(car_val, &str, &arr_size)) {
+    if (lbm_dec_str_size(car_val, &str, &arr_size)) {
       str_len += strlen_max(str, arr_size);
       str_count += 1;
     } else {
@@ -146,6 +121,7 @@ static lbm_value ext_str_join(lbm_value *args, lbm_uint argn) {
       lbm_set_error_suspect(args[0]);
       return ENC_SYM_TERROR;
     }
+    current = cell->cdr;
   }
 
   const char *delim = "";
@@ -171,8 +147,10 @@ static lbm_value ext_str_join(lbm_value *args, lbm_uint argn) {
 
   size_t i      = 0;
   size_t offset = 0;
-  for (lbm_value current = args[0]; lbm_is_cons(current); current = lbm_cdr(current)) {
-    lbm_value car_val = lbm_car(current);
+  current = args[0];
+  while (lbm_is_cons(current)) {
+    lbm_cons_t *cell = lbm_ref_cell(current);
+    lbm_value car_val = cell->car;
     // All arrays have been prechecked.
     lbm_array_header_t *array = (lbm_array_header_t*) lbm_car(car_val);
     char *str = (char*)array->data;
@@ -186,6 +164,7 @@ static lbm_value ext_str_join(lbm_value *args, lbm_uint argn) {
       offset += delim_len;
     }
     i++;
+    current = cell->cdr;
   }
 
   result_str[str_len] = '\0';
@@ -238,7 +217,7 @@ static lbm_value ext_str_part(lbm_value *args, lbm_uint argn) {
 
   size_t str_arr_len = 0;
   char *str = NULL;//lbm_dec_str(args[0]);
-  if (!dec_str_size(args[0], &str, &str_arr_len)) {
+  if (!lbm_dec_str_size(args[0], &str, &str_arr_len)) {
     return ENC_SYM_TERROR;
   }
 
@@ -259,15 +238,7 @@ static lbm_value ext_str_part(lbm_value *args, lbm_uint argn) {
     n = MIN(lbm_dec_as_u32(args[2]), n);
   }
 
-  lbm_value res;
-  if (lbm_create_array(&res, n + 1)) {
-    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(res);
-    memcpy(arr->data, str + start, n);
-    ((char*)(arr->data))[n] = '\0';
-    return res;
-  } else {
-    return ENC_SYM_MERROR;
-  }
+  return span_to_lbm(str + start, n);
 }
 
 static bool char_in(char c, char *delim, unsigned int max_ix) {
@@ -288,7 +259,7 @@ static lbm_value ext_str_split(lbm_value *args, lbm_uint argn) {
 
   size_t str_arr_size = 0;
   char *str = NULL; //lbm_dec_str(args[0]);
-  if (!dec_str_size(args[0], &str, &str_arr_size)) {
+  if (!lbm_dec_str_size(args[0], &str, &str_arr_size)) {
     return ENC_SYM_TERROR;
   }
 
@@ -310,18 +281,12 @@ static lbm_value ext_str_split(lbm_value *args, lbm_uint argn) {
         step_now--;
       }
 
-      lbm_value tok;
-      if (lbm_create_array(&tok, (lbm_uint)step_now + 1)) {
-        lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(tok);
-        memcpy(arr->data, str + ind_now, (unsigned int)step_now);
-        ((char*)(arr->data))[step_now] = '\0';
-        res = lbm_cons(tok, res);
-      } else {
-        return ENC_SYM_MERROR;
-      }
+      lbm_value tok = span_to_lbm(str + ind_now, (size_t)step_now);
+      if (tok == ENC_SYM_MERROR) return tok;
+      res = lbm_cons(tok, res);
     }
     return res;
-  } else if (dec_str_size(args[1], &delim, &delim_arr_size)) {
+  } else if (lbm_dec_str_size(args[1], &delim, &delim_arr_size)) {
     lbm_value res = ENC_SYM_NIL;
 
     unsigned int i_start = 0;
@@ -331,22 +296,16 @@ static lbm_value ext_str_split(lbm_value *args, lbm_uint argn) {
     // with byte-arrays.
     while (i_end < str_arr_size) {
 
-      while (str[i_end] != '\0' && !char_in(str[i_end], delim, delim_arr_size)) {
+      while (str[i_end] != '\0' && !char_in(str[i_end], delim, (unsigned int)delim_arr_size)) {
         i_end ++;
       }
 
       unsigned int len = i_end - i_start;
       char *s = &str[i_start];
-      lbm_value tok;
-      if (lbm_create_array(&tok, len + 1)) {
-        lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(tok);
-        memcpy(arr->data, s, len);
-        ((char*)(arr->data))[len] = '\0';
-        res = lbm_cons(tok, res);
-        if (res == ENC_SYM_MERROR) return res;
-      } else {
-        return ENC_SYM_MERROR;
-      }
+      lbm_value tok = span_to_lbm(s, len);
+      if (tok == ENC_SYM_MERROR) return tok;
+      res = lbm_cons(tok, res);
+      if (res == ENC_SYM_MERROR) return res;
 
       if (str[i_end] == '\0') break;
       i_start = i_end + 1;
@@ -367,20 +326,20 @@ static lbm_value ext_str_replace(lbm_value *args, lbm_uint argn) {
 
   size_t orig_arr_size = 0;
   char *orig = NULL; // lbm_dec_str(args[0]);
-  if (!dec_str_size(args[0], &orig, &orig_arr_size)) {
+  if (!lbm_dec_str_size(args[0], &orig, &orig_arr_size)) {
     return ENC_SYM_TERROR;
   }
 
   size_t rep_arr_size = 0;
   char *rep = NULL; //lbm_dec_str(args[1]);
-  if (!dec_str_size(args[1], &rep, &rep_arr_size)) {
+  if (!lbm_dec_str_size(args[1], &rep, &rep_arr_size)) {
     return ENC_SYM_TERROR;
   }
 
   size_t with_arr_size = 0;
   char *with = "";
   if (argn == 3) {
-    if (!dec_str_size(args[2], &with, &with_arr_size)) {
+    if (!lbm_dec_str_size(args[2], &with, &with_arr_size)) {
       return ENC_SYM_TERROR;
     }
   }
@@ -441,7 +400,7 @@ static lbm_value change_case(lbm_value *args, lbm_uint argn, bool to_upper) {
 
   size_t orig_arr_size = 0;
   char *orig = NULL; //lbm_dec_str(args[0]);
-  if (!dec_str_size(args[0], &orig, &orig_arr_size)) {
+  if (!lbm_dec_str_size(args[0], &orig, &orig_arr_size)) {
     return ENC_SYM_TERROR;
   }
 
@@ -576,7 +535,7 @@ static lbm_value ext_str_len(lbm_value *args, lbm_uint argn) {
 
   size_t str_arr_size = 0;
   char *str = NULL; //lbm_dec_str(args[0]);
-  if (!dec_str_size(args[0], &str, &str_arr_size)) {
+  if (!lbm_dec_str_size(args[0], &str, &str_arr_size)) {
     return ENC_SYM_TERROR;
   }
 
@@ -646,6 +605,11 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
         return ENC_SYM_MERROR;
       }
       lbm_array_header_t *header = (lbm_array_header_t *)lbm_car(args[1]);
+      // lbm_is_array_r holds for args[1], so header should be non-null.
+#ifdef __INFER__
+      __infer_assume(header != NULL);
+#endif
+
 
       lbm_int len = (lbm_int)header->size - 1;
       if (len < 0) {
@@ -654,13 +618,16 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
       }
       min_substr_len = len;
     } else if (lbm_is_list(args[1])) {
-      for (lbm_value current = args[1]; lbm_is_cons(current); current = lbm_cdr(current)) {
-        lbm_value car_val = lbm_car(current);
+      lbm_value current = args[1];
+      while (lbm_is_cons(current)) {
+        lbm_cons_t *cell = lbm_ref_cell(current);
+        lbm_value car_val = cell->car;
         lbm_array_header_t *header = lbm_dec_array_r(car_val);
         if (header) {
           lbm_int len = (lbm_int)header->size - 1;
           if (len < 0) {
             // substr is zero length array
+            current = cell->cdr;
             continue;
           }
           if (len < min_substr_len) {
@@ -671,6 +638,7 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
           lbm_set_error_reason((char *)lbm_error_str_incorrect_arg);
           return ENC_SYM_TERROR;
         }
+        current = cell->cdr;
       }
       substrings = args[1];
     } else {
@@ -690,7 +658,7 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
     for (int i = 0; i < (int)argn; i ++ ) {
       if (lbm_is_number(args[i]) && num_ix < 2) {
         nums_set[num_ix] = true;
-        nums[num_ix++] = lbm_dec_as_int(args[i]);
+        nums[num_ix++] = (int)lbm_dec_as_int(args[i]);
       }
       if (lbm_is_symbol(args[i])) {
         lbm_uint symbol = lbm_dec_sym(args[i]);
@@ -726,8 +694,10 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
 
     lbm_int dir = to_right ? 1 : -1;
     for (lbm_int i = start; to_right ? (i <= str_size - min_substr_len) : (i >= 0); i += dir) {
-      for (lbm_value current = substrings; lbm_is_cons(current); current = lbm_cdr(current)) {
-        lbm_array_header_t *header = (lbm_array_header_t *)lbm_car(lbm_car(current));
+      lbm_value current = substrings;
+      while (lbm_is_cons(current)) {
+        lbm_cons_t *cell = lbm_ref_cell(current);
+        lbm_array_header_t *header = (lbm_array_header_t *)lbm_car(cell->car);
         lbm_int substr_len         = (lbm_int)header->size - 1;
         const char *substr         = (const char *)header->data;
 
@@ -735,6 +705,7 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
             i > str_size - substr_len // substr length runs over str end.
             || substr_len < 0 // empty substr substr was zero bytes in size
             ) {
+          current = cell->cdr;
           continue;
         }
 
@@ -745,6 +716,7 @@ static lbm_value ext_str_find(lbm_value *args, lbm_uint argn) {
           }
           occurrence -= 1;
         }
+        current = cell->cdr;
       }
     }
     return lbm_enc_i(-1);

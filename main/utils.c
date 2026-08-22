@@ -19,9 +19,11 @@
     */
 
 #include "utils.h"
+#include "soc/gpio_pins.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs.h"
+#include "esp_memory_utils.h"
 
 #include <sys/time.h>
 #include <dirent.h>
@@ -188,25 +190,13 @@ const char *utils_bool_to_str(bool value) {
 }
 
 bool utils_gpio_is_valid(int pin) {
-	switch (pin) {
-	case 0:
-	case 1:
-	case 2:
-	case 3:
-	case 4:
-	case 5:
-	case 6:
-	case 7:
-	case 8:
-	case 9:
-	case 10:
-	case 18:
-	case 19:
-	case 20:
-	case 21:
-		return true;
-
-	default:
+	if (pin < 0 || pin >= SOC_GPIO_PIN_COUNT) {
 		return false;
 	}
+	return (SOC_GPIO_VALID_GPIO_MASK >> pin) & 1;
+}
+
+// True if the pointer is in an executable memory region (IRAM/IROM). Used to validate function pointers handed over by native libs
+bool utils_is_func_valid(void *func) {
+	return esp_ptr_executable(func);
 }

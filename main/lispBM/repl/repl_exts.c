@@ -1,5 +1,5 @@
 /*
-  Copyright 2024 2025 Joel Svensson  svenssonjoel@yahoo.se
+  Copyright 2024 - 2026 Joel Svensson  svenssonjoel@yahoo.se
             2022 Benjamin Vedder benjamin@vedder.se
 
   This program is free software: you can redistribute it and/or modify
@@ -16,16 +16,25 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "repl_exts.h"
 
 #include <unistd.h>
 #include <stdio.h>
 #include <dirent.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 
 #ifndef LBM_WIN
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <signal.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#else
+#include <semaphore.h>
+#endif
 #endif
 
 #include "extensions/array_extensions.h"
@@ -38,11 +47,25 @@
 #include "extensions/lbm_dyn_lib.h"
 #include "extensions/ttf_extensions.h"
 #include "extensions/random_extensions.h"
+#include "extensions/dsp_extensions.h"
+#include "extensions/crypto_extensions.h"
+#include "extensions/ecc_extensions.h"
+#include "extensions/pattern_extensions.h"
+
+#ifdef WITH_VESC
+#include "vesc_extension_stubs.h"
+#endif
+
+#ifdef WITH_CURL
+#include <curl/curl.h>
+#endif
 
 #include "eval_cps.h"
 #include "lbm_image.h"
 #include "lbm_flat_value.h"
 #include "platform_timestamp.h"
+#include "platform_thread.h"
+#include "print.h"
 
 #include <png.h>
 
@@ -107,18 +130,17 @@ static lbm_value ext_rand(lbm_value *args, lbm_uint argn) {
 
 static lbm_value ext_rand_max(lbm_value *args, lbm_uint argn) {
   (void)args; (void)argn;
-  return lbm_enc_i32(RAND_MAX);
+  return lbm_enc_u32(268435183);
 }
 
 
+// ////////////////////////////////////////////////////////////
 // BITS
 
-/*
- * args[0]: Initial value
- * args[1]: Offset in initial value to modify
- * args[2]: Value to modify with
- * args[3]: Size in bits of value to modify with
- */
+// args[0]: Initial value
+// args[1]: Offset in initial value to modify
+// args[2]: Value to modify with
+// args[3]: Size in bits of value to modify with
 static lbm_value ext_bits_enc_int(lbm_value *args, lbm_uint argn) {
   LBM_CHECK_ARGN_NUMBER(4)
     uint32_t initial = lbm_dec_as_u32(args[0]);
@@ -135,11 +157,10 @@ static lbm_value ext_bits_enc_int(lbm_value *args, lbm_uint argn) {
   }
 }
 
-/*
- * args[0]: Value
- * args[1]: Offset in initial value to get
- * args[2]: Size in bits of value to get
- */
+
+// args[0]: Value
+// args[1]: Offset in initial value to get
+// args[2]: Size in bits of value to get
 static lbm_value ext_bits_dec_int(lbm_value *args, lbm_uint argn) {
   LBM_CHECK_ARGN_NUMBER(3)
     uint32_t val = lbm_dec_as_u32(args[0]);
@@ -161,14 +182,16 @@ static lbm_value ext_bits_dec_int(lbm_value *args, lbm_uint argn) {
 extern void sleep_callback(uint32_t us);
 
 static lbm_value ext_systime(lbm_value *args, lbm_uint argn) {
+  (void) args;
+  (void) argn;
 
-  uint32_t time = timestamp();
+  uint32_t time = lbm_timestamp();
 
   return lbm_enc_u32(time);
 }
 
 static lbm_value ext_secs_since(lbm_value *args, lbm_uint argn) {
-  uint32_t t_now = timestamp();
+  uint32_t t_now = lbm_timestamp();
 
   if (argn != 1 || !lbm_is_number(args[0])) return ENC_SYM_EERROR;
 
@@ -192,11 +215,10 @@ lbm_value ext_print(lbm_value *args, lbm_uint argn) {
 
   for (unsigned int i = 0; i < argn; i ++) {
     lbm_value t = args[i];
-
-    if (lbm_is_ptr(t) && lbm_type_of(t) == LBM_TYPE_ARRAY) {
-      lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(t);
-      char *data = (char*)array->data;
-      lbm_printf_callback("%s", data);
+    char *str;
+    if (lbm_is_ptr(t) && lbm_type_of(t) == LBM_TYPE_ARRAY &&
+        lbm_value_is_printable_string(t, &str)) {
+      lbm_printf_callback("%s", str);
     } else {
       lbm_print_value(output, 1024, t);
       lbm_printf_callback("%s", output);
@@ -226,7 +248,7 @@ static bool file_handle_destructor(lbm_uint value) {
 
 // A filehandle is only a filehandle unless it has been explicitly closed.
 static bool is_file_handle(lbm_value arg) {
-  if ((lbm_uint)lbm_get_custom_descriptor(arg) == (lbm_uint)lbm_file_handle_desc) {
+  if (lbm_is_custom(arg) && ((lbm_uint)lbm_get_custom_descriptor(arg) == (lbm_uint)lbm_file_handle_desc)) {
     lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(arg);
     if (h->fp) return true;
   }
@@ -289,10 +311,10 @@ static lbm_value ext_load_file(lbm_value *args, lbm_uint argn) {
       long int  size = ftell(h->fp);
       rewind(h->fp);
 
-      if (size > 0) {
+      if (size > 0 && (size_t)size < SIZE_MAX) {
         uint8_t *data = lbm_malloc((size_t)size+1);
         if (data) {
-          memset(data, 0, (unsigned int)size+1) ;
+          memset(data, 0, (size_t)size+1) ;
 
           lbm_value val;
           if (lbm_lift_array(&val, (char*)data, (lbm_uint)size+1)) {
@@ -327,31 +349,22 @@ lbm_value sym_seek_end;
 
 static lbm_value ext_fseek(lbm_value *args, lbm_uint argn) {
   lbm_value res = ENC_SYM_TERROR;
-  if (argn == 3 &&
+  if ((argn == 2 || argn == 3) &&
       is_file_handle(args[0]) &&
-      lbm_is_number(args[1]) &&
-      lbm_is_symbol(args[2])) {
+      lbm_is_number(args[1])) {
 
-    int whence;
-    if (args[2] == sym_seek_set) {
-      whence = SEEK_SET;
-    } else if (args[2] == sym_seek_cur) {
-      whence = SEEK_CUR;
-    } else if (args[2] == sym_seek_end) {
-      whence = SEEK_END;
-    } else {
-      return res;
+    int whence = SEEK_SET;
+    if (argn == 3) {
+      if (!lbm_is_symbol(args[2])) return res;
+      if      (args[2] == sym_seek_set) whence = SEEK_SET;
+      else if (args[2] == sym_seek_cur) whence = SEEK_CUR;
+      else if (args[2] == sym_seek_end) whence = SEEK_END;
+      else return res;
     }
 
     long offset = (long)lbm_dec_as_i64(args[1]);
-
     lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
-
-    if (fseek(h->fp, offset, whence) == 0) {
-      res =  ENC_SYM_TRUE;
-    } else {
-      res = ENC_SYM_NIL;
-    }
+    res = (fseek(h->fp, offset, whence) == 0) ? ENC_SYM_TRUE : ENC_SYM_NIL;
   }
   return res;
 }
@@ -374,6 +387,7 @@ static lbm_value ext_fread_byte(lbm_value *args, lbm_uint argn) {
   if (argn == 1 &&
       is_file_handle(args[0])) {
     lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
+    if (!h || !h->fp) return ENC_SYM_EERROR;
     char c;
     size_t num = fread(&c, 1, 1, h->fp);
     if (num == 1) {
@@ -382,29 +396,54 @@ static lbm_value ext_fread_byte(lbm_value *args, lbm_uint argn) {
       res = ENC_SYM_NIL;
     }
   }
-
   return res;
 }
 
-static lbm_value ext_fwrite(lbm_value *args, lbm_uint argn) {
-
-  lbm_value res = ENC_SYM_TERROR;
-  if (argn == 2 &&
-      is_file_handle(args[0]) &&
-      lbm_is_array_r(args[1])) {
-
-    lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
-    lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(args[1]);
-    if (array) {
-      fwrite(array->data, 1, array->size, h->fp);
-      fflush(h->fp);
-      res = ENC_SYM_TRUE;
-    } else {
-      res = ENC_SYM_NIL;
-    }
+static lbm_value ext_fread(lbm_value *args, lbm_uint argn) {
+  if (argn != 2 || !is_file_handle(args[0])) return ENC_SYM_TERROR;
+  lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
+  if (!h || !h->fp) return ENC_SYM_EERROR;
+  if (lbm_is_number(args[1])) {
+    lbm_uint n = (lbm_uint)lbm_dec_as_u32(args[1]);
+    lbm_value result;
+    if (!lbm_create_array(&result, n)) return ENC_SYM_MERROR;
+    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(result);
+    size_t num = fread(arr->data, 1, n, h->fp);
+    if (num == 0) return ENC_SYM_NIL;
+    return result;
   }
-  return res;
+  if (lbm_is_array_rw(args[1])) {
+    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(args[1]);
+    size_t num = fread(arr->data, 1, arr->size, h->fp);
+    return lbm_enc_u((lbm_uint)num);
+  }
+  return ENC_SYM_TERROR;
+}
 
+
+static lbm_value ext_fwrite(lbm_value *args, lbm_uint argn) {
+  if (argn != 2 || !is_file_handle(args[0])) return ENC_SYM_TERROR;
+  lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
+  if (lbm_is_array_r(args[1])) {
+    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(args[1]);
+    if (!arr) return ENC_SYM_NIL;
+    fwrite(arr->data, 1, arr->size, h->fp);
+    fflush(h->fp);
+    return ENC_SYM_TRUE;
+  }
+  if (lbm_is_cons(args[1])) {
+    lbm_value curr = args[1];
+    while (lbm_is_cons(curr)) {
+      lbm_value val = lbm_car(curr);
+      if (!lbm_is_number(val)) return ENC_SYM_TERROR;
+      uint8_t byte = (uint8_t)lbm_dec_as_u32(val);
+      fwrite(&byte, 1, 1, h->fp);
+      curr = lbm_cdr(curr);
+    }
+    fflush(h->fp);
+    return ENC_SYM_TRUE;
+  }
+  return ENC_SYM_TERROR;
 }
 
 static lbm_value ext_fwrite_str(lbm_value *args, lbm_uint argn) {
@@ -478,6 +517,182 @@ static lbm_value ext_fwrite_image(lbm_value *args, lbm_uint argn) {
   return res;
 }
 
+static lbm_value ext_file_list(lbm_value *args, lbm_uint argn) {
+  const char *path = ".";
+  if (argn == 1 && lbm_is_array_r(args[0])) {
+    path = lbm_dec_str(args[0]);
+    if (!path) return ENC_SYM_TERROR;
+  } else if (argn != 0) {
+    return ENC_SYM_TERROR;
+  }
+  DIR *d = opendir(path);
+  if (!d) return ENC_SYM_NIL;
+  lbm_value result = ENC_SYM_NIL;
+  struct dirent *entry;
+  while ((entry = readdir(d)) != NULL) {
+    if (entry->d_name[0] == '.') continue;
+    lbm_value name;
+    if (!lbm_create_array(&name, strlen(entry->d_name) + 1)) continue;
+    lbm_array_header_t *hdr = (lbm_array_header_t*)lbm_car(name);
+    memcpy(hdr->data, entry->d_name, strlen(entry->d_name) + 1);
+    lbm_value cell = lbm_cons(name, result);
+    if (lbm_is_symbol_merror(cell)) break;
+    result = cell;
+  }
+  closedir(d);
+  return result;
+}
+
+static lbm_value ext_f_readline(lbm_value *args, lbm_uint argn) {
+  if (argn == 1 && is_file_handle(args[0])) {
+    lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
+    if (!h || !h->fp) return ENC_SYM_EERROR;
+    char buf[1024];
+    if (!fgets(buf, sizeof(buf), h->fp)) return ENC_SYM_NIL;
+    lbm_uint len = strlen(buf);
+    lbm_value result;
+    if (!lbm_create_array(&result, len + 1)) return ENC_SYM_MERROR;
+    lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(result);
+    memcpy(arr->data, buf, len + 1);
+    return result;
+  }
+  return ENC_SYM_TERROR;
+}
+
+static lbm_value ext_f_size(lbm_value *args, lbm_uint argn) {
+  if (argn == 1 && lbm_is_array_r(args[0])) {
+    const char *path = lbm_dec_str(args[0]);
+    if (!path) return ENC_SYM_TERROR;
+    struct stat st;
+    if (stat(path, &st) != 0) return ENC_SYM_NIL;
+    return lbm_enc_i32((int32_t)st.st_size);
+  }
+  return ENC_SYM_TERROR;
+}
+
+static lbm_value ext_f_sync(lbm_value *args, lbm_uint argn) {
+  if (argn == 1 && is_file_handle(args[0])) {
+    lbm_file_handle_t *h = (lbm_file_handle_t*)lbm_get_custom_value(args[0]);
+    if (!h || !h->fp) return ENC_SYM_EERROR;
+    return (fflush(h->fp) == 0) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+  }
+  return ENC_SYM_TERROR;
+}
+
+static lbm_value ext_f_connect(lbm_value *args, lbm_uint argn) {
+  (void)args; (void)argn;
+  return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_f_disconnect(lbm_value *args, lbm_uint argn) {
+  (void)args; (void)argn;
+  return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_f_fatinfo(lbm_value *args, lbm_uint argn) {
+  (void)args; (void)argn;
+  return ENC_SYM_NIL;
+}
+
+// ////////////////////////////////////////////////////////////
+// Filesystem extensions (f-*)
+//
+
+static lbm_value ext_fs_pwd(lbm_value *args, lbm_uint argn) {
+  (void)args; (void)argn;
+  char buf[512];
+  if (!getcwd(buf, sizeof(buf))) return ENC_SYM_NIL;
+  lbm_uint len = strlen(buf);
+  lbm_value result;
+  if (!lbm_create_array(&result, len + 1)) return ENC_SYM_MERROR;
+  lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(result);
+  memcpy(arr->data, buf, len + 1);
+  return result;
+}
+
+static lbm_value ext_fs_cd(lbm_value *args, lbm_uint argn) {
+  if (argn != 1 || !lbm_is_array_r(args[0])) return ENC_SYM_TERROR;
+  const char *path = lbm_dec_str(args[0]);
+  if (!path) return ENC_SYM_TERROR;
+  return chdir(path) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+static lbm_value ext_fs_mkdir(lbm_value *args, lbm_uint argn) {
+  if (argn != 1 || !lbm_is_array_r(args[0])) return ENC_SYM_TERROR;
+  const char *path = lbm_dec_str(args[0]);
+  if (!path) return ENC_SYM_TERROR;
+#ifdef LBM_WIN
+  return mkdir(path) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+#else
+  return mkdir(path, 0777) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+#endif
+}
+
+static lbm_value ext_fs_rm(lbm_value *args, lbm_uint argn) {
+  if (argn != 1 || !lbm_is_array_r(args[0])) return ENC_SYM_TERROR;
+  const char *path = lbm_dec_str(args[0]);
+  if (!path) return ENC_SYM_TERROR;
+  return unlink(path) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+static lbm_value ext_fs_mv(lbm_value *args, lbm_uint argn) {
+  if (argn != 2 || !lbm_is_array_r(args[0]) || !lbm_is_array_r(args[1])) return ENC_SYM_TERROR;
+  const char *src = lbm_dec_str(args[0]);
+  const char *dst = lbm_dec_str(args[1]);
+  if (!src || !dst) return ENC_SYM_TERROR;
+  return rename(src, dst) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+static lbm_value ext_fs_exists(lbm_value *args, lbm_uint argn) {
+  if (argn != 1 || !lbm_is_array_r(args[0])) return ENC_SYM_TERROR;
+  const char *path = lbm_dec_str(args[0]);
+  if (!path) return ENC_SYM_TERROR;
+  struct stat st;
+  return stat(path, &st) == 0 ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+// (fs-stat path) -> (size is-dir)
+static lbm_value ext_fs_stat(lbm_value *args, lbm_uint argn) {
+  if (argn != 1 || !lbm_is_array_r(args[0])) return ENC_SYM_TERROR;
+  const char *path = lbm_dec_str(args[0]);
+  if (!path) return ENC_SYM_TERROR;
+  struct stat st;
+  if (stat(path, &st) != 0) return ENC_SYM_NIL;
+  lbm_value is_dir = S_ISDIR(st.st_mode) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+  lbm_value result = lbm_cons(is_dir, ENC_SYM_NIL);
+  if (lbm_is_symbol_merror(result)) return ENC_SYM_MERROR;
+  result = lbm_cons(lbm_enc_i32((int32_t)st.st_size), result);
+  if (lbm_is_symbol_merror(result)) return ENC_SYM_MERROR;
+  return result;
+}
+
+// (fs-ls) or (fs-ls path) -> list of (name size is-dir)
+static lbm_value ext_fs_ls(lbm_value *args, lbm_uint argn) {
+  const char *path = ".";
+  if (argn == 1 && lbm_is_array_r(args[0])) {
+    path = lbm_dec_str(args[0]);
+    if (!path) return ENC_SYM_TERROR;
+  } else if (argn != 0) {
+    return ENC_SYM_TERROR;
+  }
+  DIR *d = opendir(path);
+  if (!d) return ENC_SYM_NIL;
+  lbm_value result = ENC_SYM_NIL;
+  struct dirent *entry;
+  while ((entry = readdir(d)) != NULL) {
+    if (entry->d_name[0] == '.') continue;
+    lbm_value name;
+    if (!lbm_create_array(&name, strlen(entry->d_name) + 1)) continue;
+    lbm_array_header_t *hdr = (lbm_array_header_t*)lbm_car(name);
+    memcpy(hdr->data, entry->d_name, strlen(entry->d_name) + 1);
+    lbm_value cell = lbm_cons(name, result);
+    if (lbm_is_symbol_merror(cell)) break;
+    result = cell;
+  }
+  closedir(d);
+  return result;
+}
+
 static bool all_arrays(lbm_value *args, lbm_uint argn) {
   bool r = true;
   for (uint32_t i = 0; i < argn; i ++) {
@@ -486,9 +701,122 @@ static bool all_arrays(lbm_value *args, lbm_uint argn) {
   return r;
 }
 
-#ifndef LBM_WIN
-static lbm_value ext_exec(lbm_value *args, lbm_uint argn) {
+// ////////////////////////////////////////////////////////////
+// Child process management
 
+#ifndef LBM_WIN
+
+#define MAX_CHILD_PROCESSES 32
+
+typedef enum {
+  UNUSED = 0,
+  ACTIVE,
+  FINISHED
+} child_process_state;
+
+typedef struct {
+  child_process_state state;
+  pid_t pid;
+  int status;
+  lbm_cid waiting_cid;  // CID of context waiting for this process, or -1 if none
+} child_process_t;
+
+static child_process_t child_process[MAX_CHILD_PROCESSES];
+#ifdef __APPLE__
+static dispatch_semaphore_t child_exit_sem;
+#else
+static sem_t child_exit_sem;
+#endif
+static lbm_thread_t child_monitor_thread;
+static volatile bool child_monitor_running = false;
+
+static void sigchld_handler(int sig) {
+  (void)sig;
+  int status;
+  pid_t pid;
+
+  while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+    for (int i = 0; i < MAX_CHILD_PROCESSES; i++) {
+      if (child_process[i].state == ACTIVE &&
+          child_process[i].pid == pid) {
+        child_process[i].status = status;
+        child_process[i].state = FINISHED;
+      }
+    }
+  }
+#ifdef __APPLE__
+  dispatch_semaphore_signal(child_exit_sem);
+#else
+  sem_post(&child_exit_sem);
+#endif
+}
+
+// Monitor thread - wakes on SIGCHLD and unblocks waiting LispBM contexts
+static void child_monitor_thd(void *arg) {
+  (void)arg;
+  while (child_monitor_running) {
+#ifdef __APPLE__
+    dispatch_semaphore_wait(child_exit_sem, DISPATCH_TIME_FOREVER);
+#else
+    sem_wait(&child_exit_sem);
+#endif
+    if (!child_monitor_running) break;
+
+    for (int i = 0; i < MAX_CHILD_PROCESSES; i++) {
+      if (child_process[i].state == FINISHED &&
+          child_process[i].waiting_cid != -1) {
+        lbm_unblock_ctx_unboxed(child_process[i].waiting_cid,
+                                lbm_enc_i(WEXITSTATUS(child_process[i].status)));
+        child_process[i].waiting_cid = -1;
+      }
+    }
+  }
+}
+
+static bool init_proc_management(void) {
+
+  for (int i = 0; i < MAX_CHILD_PROCESSES; i++) {
+    child_process[i].state = UNUSED;
+    child_process[i].pid = 0;
+    child_process[i].status = 0;
+    child_process[i].waiting_cid = -1;
+  }
+
+#ifdef __APPLE__
+  child_exit_sem = dispatch_semaphore_create(0);
+#else
+  if (sem_init(&child_exit_sem, 0, 0) == -1) {
+    return false;
+  }
+#endif
+
+  child_monitor_running = true;
+  if (!lbm_thread_create(&child_monitor_thread, "child_monitor",
+                         child_monitor_thd, NULL, LBM_THREAD_PRIO_NORMAL, 0)) {
+#ifndef __APPLE__
+    sem_destroy(&child_exit_sem);
+#endif
+    return false;
+  }
+
+  struct sigaction sa;
+  sa.sa_handler = sigchld_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+  if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+    child_monitor_running = false;
+#ifdef __APPLE__
+    dispatch_semaphore_signal(child_exit_sem);
+#else
+    sem_post(&child_exit_sem);
+    sem_destroy(&child_exit_sem);
+#endif
+    return false;
+  }
+  return true;
+}
+
+static lbm_value ext_proc_spawn(lbm_value *args, lbm_uint argn) {
   lbm_value res = ENC_SYM_TERROR;
 
   if (all_arrays(args, argn) && argn >= 1) {
@@ -497,19 +825,361 @@ static lbm_value ext_exec(lbm_value *args, lbm_uint argn) {
       strs[i] = lbm_dec_str(args[i]);
     }
     strs[argn] = NULL;
-    fflush(stdout);
-    int status = 0;
+
+    // allocate result
+    lbm_value pid_file_handles = lbm_heap_allocate_list(4);
+    if (pid_file_handles == ENC_SYM_MERROR) {
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+
+    lbm_file_handle_t *hstdin = lbm_malloc(sizeof(lbm_file_handle_t));
+    lbm_file_handle_t *hstdout = lbm_malloc(sizeof(lbm_file_handle_t));
+    lbm_file_handle_t *hstderr = lbm_malloc(sizeof(lbm_file_handle_t));
+    if (!hstdin || !hstdout || !hstderr) {
+      if (hstdin) lbm_free(hstdin);
+      if (hstdout) lbm_free(hstdout);
+      if (hstderr) lbm_free(hstderr);
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+    hstdin->fp = NULL; // Will be set to correct value later.
+    hstdout->fp = NULL;
+    hstderr->fp = NULL;
+
+    // Preallocate all result storage
+    lbm_value fh0;
+    lbm_value fh1;
+    lbm_value fh2;
+    lbm_custom_type_create((lbm_uint)hstdin, file_handle_destructor, lbm_file_handle_desc, &fh0);
+    lbm_custom_type_create((lbm_uint)hstdout, file_handle_destructor, lbm_file_handle_desc, &fh1);
+    lbm_custom_type_create((lbm_uint)hstderr, file_handle_destructor, lbm_file_handle_desc, &fh2);
+
+    if (fh0 == ENC_SYM_MERROR || fh1 == ENC_SYM_MERROR || fh2 == ENC_SYM_MERROR) {
+      // Here we could potentially end up in a double-free situation.
+      // lbm_free is ok with double-free but in case some other "external"
+      // is switched in and allocates a new array at the just freed address,
+      // the double-free may turn into a free + a free of some unralted allocation!
+      // So lets use a careful pattern here too:
+      if (fh0 == ENC_SYM_MERROR) lbm_free(hstdin);
+      if (fh1 == ENC_SYM_MERROR) lbm_free(hstdout);
+      if (fh2 == ENC_SYM_MERROR) lbm_free(hstderr);
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+
+    lbm_value curr = pid_file_handles;
+    curr = lbm_cdr(curr); // The car is for the pid
+    lbm_set_car(curr, fh0);
+    curr = lbm_cdr(curr);
+    lbm_set_car(curr, fh1);
+    curr = lbm_cdr(curr);
+    lbm_set_car(curr, fh2);
+    lbm_set_cdr(curr, ENC_SYM_NIL);
+
+    int stdin_pipe[2];   // [0]=read end,  [1]=write end
+    int stdout_pipe[2];
+    int stderr_pipe[2];
+
+    int pr1 = pipe(stdin_pipe);
+    int pr2 = pipe(stdout_pipe);
+    int pr3 = pipe(stderr_pipe);
+
+    if (pr1 == -1 || pr2 == -1 || pr3 == -1) {
+      if(pr1 != -1) {
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+      }
+      if (pr2 != -1) {
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+      }
+      if (pr3 != -1) {
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
+      }
+      free(strs);
+      return ENC_SYM_EERROR;
+    }
+
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+
+    // Critical section
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+
+    // If no free slot in child array, do not fork!
+    int slot_ix = -1;
+    for (int i = 0; i < MAX_CHILD_PROCESSES; i ++ ) {
+      if (child_process[i].state == UNUSED) {
+        slot_ix = i;
+        break;
+      }
+    }
+    if (slot_ix < 0) {
+      sigprocmask(SIG_SETMASK, &oldmask, NULL);
+      close(stdin_pipe[0]);
+      close(stdin_pipe[1]);
+      close(stdout_pipe[0]);
+      close(stdout_pipe[1]);
+      close(stderr_pipe[0]);
+      close(stderr_pipe[1]);
+      free(strs);
+      return ENC_SYM_NIL;
+    }
+
+    // Convert to FILE* for LispBM file handle compatibility
+    FILE *child_stdin  = fdopen(stdin_pipe[1], "w");
+    FILE *child_stdout = fdopen(stdout_pipe[0], "r");
+    FILE *child_stderr = fdopen(stderr_pipe[0], "r");
+
+    if (!child_stdin || !child_stdout || !child_stderr) {
+      if (child_stdin) fclose(child_stdin); else close(stdin_pipe[1]);
+      if (child_stdout) fclose(child_stdout); else close(stdout_pipe[0]);
+      if (child_stderr) fclose(child_stderr); else close(stderr_pipe[0]);
+      close(stdin_pipe[0]);
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      free(strs);
+      sigprocmask(SIG_SETMASK, &oldmask, NULL);
+      return ENC_SYM_MERROR;
+    }
+
+    hstdin->fp = child_stdin;
+    hstdout->fp = child_stdout;
+    hstderr->fp = child_stderr;
+
+    fflush(stdout); //avoid duplication of buffered output.
     int pid = fork();
-    if (pid == 0) {
-      execvp(strs[0], &strs[1]);
-      exit(0);
+    if (pid == 0) { // Child
+      close(stdin_pipe[1]);
+      close(stdout_pipe[0]);
+      close(stderr_pipe[0]);
+
+      dup2(stdin_pipe[0], STDIN_FILENO);   // Redirect stdin
+      dup2(stdout_pipe[1], STDOUT_FILENO); // Redirect stdout
+      dup2(stderr_pipe[1], STDERR_FILENO); // Redirect stderr
+
+      close(stdin_pipe[0]);
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      sigprocmask(SIG_SETMASK, &oldmask, NULL);
+      execvp(strs[0], strs);
+      _exit(127); // execvp failed and we exit with command not found (127)
+    } else if (pid > 0) {
+      child_process[slot_ix].state = ACTIVE;
+      child_process[slot_ix].pid = pid;
+      child_process[slot_ix].waiting_cid = -1;
+
+      close(stdin_pipe[0]);   // Close read end
+      close(stdout_pipe[1]);  // Close write end
+      close(stderr_pipe[1]);
+
+      lbm_set_car(pid_file_handles, lbm_enc_i(pid));
+      res = pid_file_handles;
     } else {
-      waitpid(pid, &status, 0);
-      res = ENC_SYM_TRUE;
+      fclose(child_stdin);   // closes stdin_pipe[1]
+      fclose(child_stdout);  // closes stdout_pipe[0]
+      fclose(child_stderr);  // closes stderr_pipe[0]
+      hstdin->fp = NULL;     // prevent double-close in destructor
+      hstdout->fp = NULL;
+      hstderr->fp = NULL;
+      close(stdin_pipe[0]);  // these weren't fdopen'd
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      res = ENC_SYM_EERROR;
+    }
+    free(strs);
+    sigprocmask(SIG_SETMASK, &oldmask, NULL);
+  }
+  return res;
+}
+
+static lbm_value ext_proc_spawn_detached(lbm_value *args, lbm_uint argn) {
+  lbm_value res = ENC_SYM_TERROR;
+
+  if (all_arrays(args, argn) && argn >= 1) {
+    char **strs = malloc(argn * sizeof(char*) + 1);
+    for (uint32_t i = 0; i < argn; i ++) {
+      strs[i] = lbm_dec_str(args[i]);
+    }
+    strs[argn] = NULL;
+
+    // allocate result
+    lbm_value file_handles = lbm_heap_allocate_list(3);
+    if (file_handles == ENC_SYM_MERROR) {
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+
+    lbm_file_handle_t *hstdin = lbm_malloc(sizeof(lbm_file_handle_t));
+    lbm_file_handle_t *hstdout = lbm_malloc(sizeof(lbm_file_handle_t));
+    lbm_file_handle_t *hstderr = lbm_malloc(sizeof(lbm_file_handle_t));
+    if (!hstdin || !hstdout || !hstderr) {
+      if (hstdin) lbm_free(hstdin);
+      if (hstdout) lbm_free(hstdout);
+      if (hstderr) lbm_free(hstderr);
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+    hstdin->fp = NULL; // Will be set to correct value later.
+    hstdout->fp = NULL;
+    hstderr->fp = NULL;
+
+    // Preallocate all result storage
+    lbm_value fh0;
+    lbm_value fh1;
+    lbm_value fh2;
+    lbm_custom_type_create((lbm_uint)hstdin, file_handle_destructor, lbm_file_handle_desc, &fh0);
+    lbm_custom_type_create((lbm_uint)hstdout, file_handle_destructor, lbm_file_handle_desc, &fh1);
+    lbm_custom_type_create((lbm_uint)hstderr, file_handle_destructor, lbm_file_handle_desc, &fh2);
+
+    if (fh0 == ENC_SYM_MERROR || fh1 == ENC_SYM_MERROR || fh2 == ENC_SYM_MERROR) {
+      // Here we could potentially end up in a double-free situation.
+      // lbm_free is ok with double-free but in case some other "external"
+      // is switched in and allocates a new array at the just freed address,
+      // the double-free may turn into a free + a free of some unralted allocation!
+      // So lets use a careful pattern here too:
+      if (fh0 == ENC_SYM_MERROR) lbm_free(hstdin);
+      if (fh1 == ENC_SYM_MERROR) lbm_free(hstdout);
+      if (fh2 == ENC_SYM_MERROR) lbm_free(hstderr);
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+
+    lbm_value curr = file_handles;
+    lbm_set_car(curr, fh0);
+    curr = lbm_cdr(curr);
+    lbm_set_car(curr, fh1);
+    curr = lbm_cdr(curr);
+    lbm_set_car(curr, fh2);
+    lbm_set_cdr(curr, ENC_SYM_NIL);
+
+    int stdin_pipe[2];   // [0]=read end,  [1]=write end
+    int stdout_pipe[2];
+    int stderr_pipe[2];
+
+    int pr1 = pipe(stdin_pipe);
+    int pr2 = pipe(stdout_pipe);
+    int pr3 = pipe(stderr_pipe);
+    if (pr1 == -1 || pr2 == -1 || pr3 == -1) {
+      if(pr1 != -1) {
+        close(stdin_pipe[0]);
+        close(stdin_pipe[1]);
+      }
+      if (pr2 != -1) {
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+      }
+      if (pr3 != -1) {
+        close(stderr_pipe[0]);
+        close(stderr_pipe[1]);
+      }
+      free(strs);
+      return ENC_SYM_EERROR;
+    }
+
+    // Convert to FILE* for LispBM file handle compatibility
+    FILE *child_stdin  = fdopen(stdin_pipe[1], "w");
+    FILE *child_stdout = fdopen(stdout_pipe[0], "r");
+    FILE *child_stderr = fdopen(stderr_pipe[0], "r");
+
+    if (!child_stdin || !child_stdout || !child_stderr) {
+      if (child_stdin) fclose(child_stdin); else close(stdin_pipe[1]);
+      if (child_stdout) fclose(child_stdout); else close(stdout_pipe[0]);
+      if (child_stderr) fclose(child_stderr); else close(stderr_pipe[0]);
+      close(stdin_pipe[0]);
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      free(strs);
+      return ENC_SYM_MERROR;
+    }
+
+    hstdin->fp = child_stdin;
+    hstdout->fp = child_stdout;
+    hstderr->fp = child_stderr;
+
+    fflush(stdout); //avoid duplication of buffered output.
+    int pid = fork();
+    if (pid == 0) { // Child process
+      close(stdin_pipe[1]);
+      close(stdout_pipe[0]);
+      close(stderr_pipe[0]);
+
+      dup2(stdin_pipe[0], STDIN_FILENO);   // Redirect stdin
+      dup2(stdout_pipe[1], STDOUT_FILENO); // Redirect stdout
+      dup2(stderr_pipe[1], STDERR_FILENO); // Redirect stderr
+
+      close(stdin_pipe[0]);
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      execvp(strs[0], strs);
+      _exit(127);
+    } else if (pid > 0) {
+      close(stdin_pipe[0]);   // Close read end
+      close(stdout_pipe[1]);  // Close write end
+      close(stderr_pipe[1]);
+
+      res = file_handles;
+      free(strs);
+    } else {
+      fclose(child_stdin);   // closes stdin_pipe[1]
+      fclose(child_stdout);  // closes stdout_pipe[0]
+      fclose(child_stderr);  // closes stderr_pipe[0]
+      hstdin->fp = NULL;     // prevent double-close in destructor
+      hstdout->fp = NULL;
+      hstderr->fp = NULL;
+      close(stdin_pipe[0]);  // these weren't fdopen'd
+      close(stdout_pipe[1]);
+      close(stderr_pipe[1]);
+      free(strs);
+      res = ENC_SYM_EERROR;
     }
   }
   return res;
 }
+
+static lbm_value ext_proc_wait(lbm_value *args, lbm_uint argn) {
+  lbm_value res = ENC_SYM_TERROR;
+  if (argn == 1 &&
+      lbm_is_number(args[0])) {
+    int pid = lbm_dec_as_i32(args[0]);
+
+    sigset_t mask, oldmask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+
+    // Critical section
+    sigprocmask(SIG_BLOCK, &mask, &oldmask);
+    int slot_ix = -1;
+    for (int i = 0; i < MAX_CHILD_PROCESSES; i ++) {
+      if (child_process[i].pid == pid &&
+          child_process[i].state != UNUSED) {
+        slot_ix = i;
+        break;
+      }
+    }
+    if (slot_ix >= 0) {
+      if (child_process[slot_ix].state == ACTIVE) {
+        child_process[slot_ix].waiting_cid = lbm_get_current_cid();
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+        lbm_block_ctx_from_extension();
+        return ENC_SYM_NIL;
+      } else if (child_process[slot_ix].state == FINISHED) {
+        int status = child_process[slot_ix].status;
+        child_process[slot_ix].state = UNUSED;
+        sigprocmask(SIG_SETMASK, &oldmask, NULL);
+        return lbm_enc_i(WEXITSTATUS(status));
+      }
+    }
+    sigprocmask(SIG_SETMASK, &oldmask, NULL);
+    res = ENC_SYM_EERROR;
+  }
+  return res;
+}
+
+
 #endif
 
 static lbm_value ext_unsafe_call_system(lbm_value *args, lbm_uint argn) {
@@ -533,10 +1203,10 @@ static lbm_value ext_unsafe_call_system(lbm_value *args, lbm_uint argn) {
 // a display driver for displaying images onto an image RGB888
 
 // blit into a buffer that is guaranteed large enough.
-static void buffer_blast_indexed2(uint8_t *dest, uint8_t *img, color_t *colors) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_indexed2(uint8_t *dest, image_buffer_t *img, color_t *colors) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
 
   uint32_t t_pos = 0;
@@ -553,10 +1223,10 @@ static void buffer_blast_indexed2(uint8_t *dest, uint8_t *img, color_t *colors) 
   }
 }
 
-static void buffer_blast_indexed4(uint8_t *dest, uint8_t *img, color_t *colors) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_indexed4(uint8_t *dest, image_buffer_t *img, color_t *colors) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
 
   uint32_t t_pos = 0;
@@ -573,10 +1243,10 @@ static void buffer_blast_indexed4(uint8_t *dest, uint8_t *img, color_t *colors) 
   }
 }
 
-static void buffer_blast_indexed16(uint8_t *dest, uint8_t *img, color_t *colors) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_indexed16(uint8_t *dest, image_buffer_t *img, color_t *colors) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
 
   uint32_t t_pos = 0;
@@ -593,10 +1263,10 @@ static void buffer_blast_indexed16(uint8_t *dest, uint8_t *img, color_t *colors)
   }
 }
 
-static void buffer_blast_rgb332(uint8_t *dest, uint8_t *img) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_rgb332(uint8_t *dest, image_buffer_t *img) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
 
   uint32_t t_pos = 0;
@@ -614,10 +1284,10 @@ static void buffer_blast_rgb332(uint8_t *dest, uint8_t *img) {
   }
 }
 
-static void buffer_blast_rgb565(uint8_t *dest, uint8_t *img) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_rgb565(uint8_t *dest, image_buffer_t *img) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
 
   uint32_t t_pos = 0;
@@ -633,10 +1303,10 @@ static void buffer_blast_rgb565(uint8_t *dest, uint8_t *img) {
   }
 }
 
-static void buffer_blast_rgb888(uint8_t *dest, uint8_t *img) {
-  uint8_t *data = image_buffer_data(img);
-  uint16_t w    = image_buffer_width(img);
-  uint16_t h    = image_buffer_height(img);
+static void buffer_blast_rgb888(uint8_t *dest, image_buffer_t *img) {
+  uint8_t *data = img->data;
+  uint16_t w    = img->width;
+  uint16_t h    = img->height;
   int num_pix = w * h;
   memcpy(dest, data, (size_t)num_pix * 3);
 }
@@ -745,29 +1415,28 @@ static bool image_renderer_render(image_buffer_t *img, uint16_t x, uint16_t y, c
 
     uint16_t w = img->width;
     uint16_t h = img->height;
-    uint8_t* data = img->mem_base;
 
     uint8_t *buffer = malloc((size_t)(w * h * 3)); // RGB 888
     if (buffer) {
-      uint8_t  bpp = img->fmt;
+      uint8_t  bpp = (uint8_t)img->fmt;
       switch(bpp) {
       case indexed2:
-        buffer_blast_indexed2(buffer, data, colors);
+        buffer_blast_indexed2(buffer, img, colors);
         break;
       case indexed4:
-        buffer_blast_indexed4(buffer, data, colors);
+        buffer_blast_indexed4(buffer, img, colors);
         break;
       case indexed16:
-        buffer_blast_indexed16(buffer, data, colors);
+        buffer_blast_indexed16(buffer, img, colors);
         break;
       case rgb332:
-        buffer_blast_rgb332(buffer, data);
+        buffer_blast_rgb332(buffer, img);
         break;
       case rgb565:
-        buffer_blast_rgb565(buffer, data);
+        buffer_blast_rgb565(buffer, img);
         break;
       case rgb888:
-        buffer_blast_rgb888(buffer, data);
+        buffer_blast_rgb888(buffer, img);
         break;
       default:
         break;
@@ -846,6 +1515,7 @@ lbm_value ext_image_save_const_heap_ix(lbm_value *args, lbm_uint argn) {
 
 
 int dummy_f(lbm_value v, bool shared, void *arg) {
+  (void) arg;
   if (shared) {
     lbm_printf_callback("shared node detected\n");
   }
@@ -867,6 +1537,280 @@ lbm_value ext_rt(lbm_value *args, lbm_uint argn) {
   return ENC_SYM_TERROR;
 }
 
+
+
+
+// ////////////////////////////////////////////////////////////
+// A dynamic extension and its non-dynamic extension "getter"
+
+lbm_value a = ENC_SYM_NIL;
+
+lbm_value ext_dynamic(lbm_value *args, lbm_uint argn) {
+  lbm_value b = a;
+  a = args[0];
+  return b;
+}
+
+lbm_value ext_register_dynamic_extension(lbm_value *args, lbm_uint argn) {
+  (void)args;
+  (void)argn;
+
+  lbm_uint id;
+  if (!lbm_lookup_extension_id("ext-d1", &id)) {
+    const char *literal = "ext-d1";
+    size_t len = strlen(literal) + 1;
+    char *name = lbm_malloc(len);
+    if (!name) return ENC_SYM_NIL;
+    memcpy(name, literal, len);
+    return lbm_add_extension(name, ext_dynamic) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+  }
+  return lbm_add_extension("ext-d1", ext_dynamic) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+lbm_value ext_register_dynamic_extension2(lbm_value *args, lbm_uint argn) {
+  (void)args;
+  (void)argn;
+  // a test where the string is not in lbm_memory.
+  return lbm_add_extension("ext-d2", ext_dynamic) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+}
+
+
+// ------------------------------------------------------------
+// import
+
+#ifdef WITH_CURL
+
+// Importing an "http://..." url sets the import_base_url
+static char *import_base_url = NULL;
+
+// Directory part of a URL, e.g. "https://host/dir/file.lisp" -> "https://host/dir/"
+// and "https://host" -> "https://host/". Result is malloc'd, caller frees.
+static char *url_dirname(const char *url) {
+  const char *scheme_end = strstr(url, "://");
+  if (!scheme_end) return NULL;
+  const char *path_start = scheme_end + 3;
+  const char *last_slash = strrchr(path_start, '/');
+  size_t len;
+  if (!last_slash) {
+    len = strlen(url);
+    char *res = malloc(len + 2);
+    if (!res) return NULL;
+    memcpy(res, url, len);
+    res[len] = '/';
+    res[len + 1] = 0;
+    return res;
+  }
+  len = (size_t)(last_slash - url) + 1;
+  char *res = malloc(len + 1);
+  if (!res) return NULL;
+  memcpy(res, url, len);
+  res[len] = 0;
+  return res;
+}
+
+static char *url_join(const char *base, const char *rel) {
+  if (strncmp(rel, "http://", 7) == 0 || strncmp(rel, "https://", 8) == 0) {
+    return strdup(rel);
+  }
+
+  if (rel[0] == '/') {
+    const char *scheme_end = strstr(base, "://");
+    if (!scheme_end) return NULL;
+    const char *path_start = strchr(scheme_end + 3, '/');
+    size_t prefix_len = path_start ? (size_t)(path_start - base) : strlen(base);
+    size_t rel_len = strlen(rel);
+    char *res = malloc(prefix_len + rel_len + 1);
+    if (!res) return NULL;
+    memcpy(res, base, prefix_len);
+    memcpy(res + prefix_len, rel, rel_len + 1);
+    return res;
+  }
+
+  char *dir = url_dirname(base);
+  if (!dir) return NULL;
+  size_t dir_len = strlen(dir);
+  size_t rel_len = strlen(rel);
+  char *res = malloc(dir_len + rel_len + 1);
+  if (!res) {
+    free(dir);
+    return NULL;
+  }
+  memcpy(res, dir, dir_len);
+  memcpy(res + dir_len, rel, rel_len + 1);
+  free(dir);
+  return res;
+}
+
+typedef struct {
+  uint8_t *data;
+  size_t size;
+  size_t cap;
+} curl_accum_t;
+
+static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+  curl_accum_t *acc = (curl_accum_t*)userdata;
+  size_t add = size * nmemb;
+  if (acc->size + add + 1 > acc->cap) {
+    size_t newcap = acc->cap == 0 ? 4096 : acc->cap;
+    while (newcap < acc->size + add + 1) newcap *= 2;
+    uint8_t *p = realloc(acc->data, newcap);
+    if (!p) return 0;
+    acc->data = p;
+    acc->cap = newcap;
+  }
+  memcpy(acc->data + acc->size, ptr, add);
+  acc->size += add;
+  acc->data[acc->size] = 0;
+  return add;
+}
+
+static lbm_value fetch_url_to_lbm_array(const char *url) {
+  curl_accum_t acc = {0};
+  CURL *curl = curl_easy_init();
+  if (!curl) return ENC_SYM_NIL;
+
+  curl_easy_setopt(curl, CURLOPT_URL, url);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&acc);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "lispbm-repl");
+  curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+  CURLcode rc = curl_easy_perform(curl);
+  curl_easy_cleanup(curl);
+
+  if (rc != CURLE_OK || acc.size == 0) {
+    free(acc.data);
+    return ENC_SYM_NIL;
+  }
+
+  uint8_t *lbm_data = lbm_malloc(acc.size + 1);
+  if (!lbm_data) {
+    free(acc.data);
+    return ENC_SYM_MERROR;
+  }
+  memcpy(lbm_data, acc.data, acc.size + 1);
+  free(acc.data);
+
+  lbm_value val;
+  if (!lbm_lift_array(&val, (char*)lbm_data, (lbm_uint)(acc.size + 1))) {
+    lbm_free(lbm_data);
+    return ENC_SYM_MERROR;
+  }
+  return val;
+}
+
+#endif // WITH_CURL
+
+static lbm_value load_local_file_to_lbm_array(const char *filename) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp) return ENC_SYM_NIL;
+
+  lbm_value res = ENC_SYM_EERROR;
+  if (fseek(fp, 0, SEEK_END) >= 0) {
+    res = ENC_SYM_MERROR;
+    long size = ftell(fp);
+    rewind(fp);
+
+    if (size > 0 && (size_t)size < SIZE_MAX) {
+      uint8_t *data = lbm_malloc((size_t)size + 1);
+      if (data) {
+        memset(data, 0, (size_t)size + 1);
+        lbm_value val;
+        if (lbm_lift_array(&val, (char*)data, (lbm_uint)size + 1)) {
+          size_t n = fread(data, 1, (size_t)size, fp);
+          if (n > 0) {
+            res = val;
+          } else {
+            lbm_free(data);
+            res = ENC_SYM_NIL;
+          }
+        } else {
+          lbm_free(data);
+        }
+      }
+    } else {
+      res = ENC_SYM_NIL;
+    }
+  }
+  fclose(fp);
+  return res;
+}
+
+//Like lbm_define but meant to be run inside an extension
+static bool do_define(const char *symbol, lbm_value value) {
+  lbm_uint sym_id;
+  if (!lbm_get_symbol_by_name(symbol, &sym_id) &&
+      !lbm_add_symbol_const_base(symbol, &sym_id, false)) {
+    return false;
+  }
+  lbm_uint ix_key = sym_id & GLOBAL_ENV_MASK;
+  lbm_value *glob_env = lbm_get_global_env();
+  lbm_value new_env = lbm_env_set(glob_env[ix_key], lbm_enc_sym(sym_id), value);
+  if (lbm_is_symbol(new_env)) return false;
+  glob_env[ix_key] = new_env;
+  return true;
+}
+
+// (import filename sym)
+// Supports importing URLs using libcurl.
+// pkg@ imports are detected and return [0].
+static lbm_value ext_import(lbm_value *args, lbm_uint argn) {
+  if (argn != 2 || !lbm_is_array_r(args[0]) || !lbm_is_symbol(args[1])) return ENC_SYM_TERROR;
+  char *filename = lbm_dec_str(args[0]);
+  if (!filename) return ENC_SYM_TERROR;
+  const char *symname = lbm_get_name_by_symbol(lbm_dec_sym(args[1]));
+  if (!symname) return ENC_SYM_TERROR;
+
+  if (strncmp(filename, "pkg@://", 7) == 0) {
+    lbm_printf_callback("import: skipping pkg@:// package \"%s\" (not supported)\n", filename);
+    lbm_value empty;
+    if (!lbm_create_array(&empty, 1)) return ENC_SYM_MERROR;
+    ((uint8_t*)((lbm_array_header_t*)lbm_car(empty))->data)[0] = 0;
+    do_define(symname, empty);
+    return empty;
+  }
+
+#ifdef WITH_CURL
+  const char *resolved_url = NULL;
+  char *joined = NULL;
+  if (strncmp(filename, "http://", 7) == 0 || strncmp(filename, "https://", 8) == 0) {
+    free(import_base_url);
+    import_base_url = strdup(filename);
+    resolved_url = filename;
+  } else if (import_base_url) {
+    joined = url_join(import_base_url, filename);
+    if (joined) {
+      free(import_base_url);
+      import_base_url = strdup(joined);
+      resolved_url = joined;
+    }
+  }
+
+  if (resolved_url) {
+    lbm_value bytes = fetch_url_to_lbm_array(resolved_url);
+    if (lbm_is_array_r(bytes)) {
+      do_define(symname, bytes);
+      free(joined);
+      return bytes;
+    }
+    lbm_printf_callback("import: failed to fetch \"%s\", trying local file\n", resolved_url);
+    free(joined);
+  }
+#endif
+
+  lbm_value bytes = load_local_file_to_lbm_array(filename);
+  if (lbm_is_array_r(bytes)) {
+    do_define(symname, bytes);
+    return bytes;
+  }
+  lbm_printf_callback("import: failed to open \"%s\"\n", filename);
+  return ENC_SYM_NIL;
+}
+
 // ------------------------------------------------------------
 // Init
 
@@ -882,10 +1826,14 @@ int init_exts(void) {
   lbm_dyn_lib_init();
   lbm_ttf_extensions_init();
   lbm_random_extensions_init();
+  lbm_dsp_extensions_init();
+  lbm_crypto_extensions_init();
+  lbm_ecc_extensions_init();
+  lbm_pattern_extensions_init();
 
-  //lbm_value sym_seek_set;
-  //lbm_value sym_seek_cur;
-  //lbm_value sym_seem_end;
+#ifndef LBM_WIN
+  init_proc_management();
+#endif
 
   lbm_uint seek_set = 0;
   lbm_uint seek_cur = 0;
@@ -903,19 +1851,38 @@ int init_exts(void) {
 
   lbm_add_extension("unsafe-call-system", ext_unsafe_call_system);
 #ifndef LBM_WIN
-  lbm_add_extension("exec", ext_exec);
+  lbm_add_extension("proc-spawn", ext_proc_spawn);
+  lbm_add_extension("proc-spawn-detached", ext_proc_spawn_detached);
+  lbm_add_extension("proc-wait", ext_proc_wait);
 #endif
-  lbm_add_extension("fclose", ext_fclose);
-  lbm_add_extension("fopen", ext_fopen);
-  lbm_add_extension("load-file", ext_load_file);
-  lbm_add_extension("fwrite", ext_fwrite);
-  lbm_add_extension("fwrite-str", ext_fwrite_str);
-  lbm_add_extension("fwrite-value", ext_fwrite_value);
-  lbm_add_extension("fwrite-image", ext_fwrite_image);
-  lbm_add_extension("fread-byte", ext_fread_byte);
-  lbm_add_extension("fseek", ext_fseek);
-  lbm_add_extension("ftell", ext_ftell);
-  lbm_add_extension("print", ext_print);
+  lbm_add_extension("f-close",        ext_fclose);
+  lbm_add_extension("f-open",         ext_fopen);
+  lbm_add_extension("load-file",      ext_load_file);
+  lbm_add_extension("f-write",        ext_fwrite);
+  lbm_add_extension("f-write-str",    ext_fwrite_str);
+  lbm_add_extension("f-write-value",  ext_fwrite_value);
+  lbm_add_extension("f-write-image",  ext_fwrite_image);
+  lbm_add_extension("f-read-byte",    ext_fread_byte);
+  lbm_add_extension("f-read",         ext_fread);
+  lbm_add_extension("f-seek",         ext_fseek);
+  lbm_add_extension("f-tell",         ext_ftell);
+  lbm_add_extension("f-readline",     ext_f_readline);
+  lbm_add_extension("f-size",         ext_f_size);
+  lbm_add_extension("f-sync",         ext_f_sync);
+  lbm_add_extension("f-connect",      ext_f_connect);
+  lbm_add_extension("f-connect-nand", ext_f_connect);
+  lbm_add_extension("f-disconnect",   ext_f_disconnect);
+  lbm_add_extension("f-fatinfo",      ext_f_fatinfo);
+  lbm_add_extension("f-list",          ext_file_list);
+  lbm_add_extension("f-pwd",          ext_fs_pwd);
+  lbm_add_extension("f-cd",           ext_fs_cd);
+  lbm_add_extension("f-mkdir",        ext_fs_mkdir);
+  lbm_add_extension("f-rm",           ext_fs_rm);
+  lbm_add_extension("f-rename",       ext_fs_mv);
+  lbm_add_extension("f-exists",       ext_fs_exists);
+  lbm_add_extension("f-stat",         ext_fs_stat);
+  lbm_add_extension("f-ls",           ext_fs_ls);
+  lbm_add_extension("print",     ext_print);
   lbm_add_extension("systime", ext_systime);
   lbm_add_extension("secs-since", ext_secs_since);
 
@@ -934,6 +1901,15 @@ int init_exts(void) {
   lbm_add_extension("set-active-img", ext_set_active_image);
   lbm_add_extension("save-active-img", ext_save_active_image);
   lbm_add_extension("display-to-img", ext_display_to_image);
+
+  lbm_add_extension("reg-dyn-ext", ext_register_dynamic_extension);
+  lbm_add_extension("reg-dyn-ext2", ext_register_dynamic_extension2);
+
+  lbm_add_extension("import", ext_import);
+
+#ifdef WITH_VESC
+  load_vesc_extension_stubs();
+#endif
 
   if (lbm_get_num_extensions() < lbm_get_max_extensions()) {
     return 1;

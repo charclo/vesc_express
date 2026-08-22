@@ -22,10 +22,23 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "sdkconfig.h"
+
+#if CONFIG_BT_BLUEDROID_ENABLED
 
 void comm_ble_init(void);
 bool comm_ble_is_connected();
 int comm_ble_mtu_now(void);
 void comm_ble_send_packet(unsigned char *data, unsigned int len);
+
+#else
+
+void comm_ble_init(void);
+bool comm_ble_is_connected(void);
+int comm_ble_mtu_now(void);
+void comm_ble_send_packet(unsigned char *data, unsigned int len);
+
+
+#endif
 
 #endif /* MAIN_COMM_BLE_H_ */

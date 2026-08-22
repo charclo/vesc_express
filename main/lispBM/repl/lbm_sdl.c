@@ -60,6 +60,8 @@ static lbm_uint lookup_sdl_event_symbol(uint32_t sdl_event) {
 }
 
 static lbm_value ext_sdl_init(lbm_value *args, lbm_uint argn) {
+  (void) args;
+  (void) argn;
   // TODO init differently depending on args
   lbm_value res = lbm_enc_sym(SYM_NIL);
 
@@ -71,8 +73,17 @@ static lbm_value ext_sdl_init(lbm_value *args, lbm_uint argn) {
 }
 
 static bool sdl_window_destructor(lbm_uint value) {
-  SDL_DestroyWindow((SDL_Window*)value);
+  if (value) SDL_DestroyWindow((SDL_Window*)value);
   return true;
+}
+
+static lbm_value ext_sdl_destroy_window(lbm_value *args, lbm_uint argn) {
+  if (argn == 1 && lbm_type_of(args[0]) == LBM_TYPE_CUSTOM) {
+    lbm_uint *m = (lbm_uint *)lbm_dec_custom(args[0]);
+    SDL_DestroyWindow((SDL_Window*)m[CUSTOM_TYPE_VALUE]);
+    m[CUSTOM_TYPE_VALUE] = 0;
+  }
+  return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_sdl_create_window(lbm_value *args, lbm_uint argn) {
@@ -102,8 +113,17 @@ static lbm_value ext_sdl_create_window(lbm_value *args, lbm_uint argn) {
 }
 
 static bool sdl_renderer_destructor(lbm_uint value) {
-  SDL_DestroyRenderer((SDL_Renderer*)value);
+  if (value) SDL_DestroyRenderer((SDL_Renderer*)value);
   return true;
+}
+
+static lbm_value ext_sdl_destroy_renderer(lbm_value *args, lbm_uint argn) {
+  if (argn == 1 && lbm_type_of(args[0]) == LBM_TYPE_CUSTOM) {
+    lbm_uint *m = (lbm_uint *)lbm_dec_custom(args[0]);
+    SDL_DestroyRenderer((SDL_Renderer*)m[CUSTOM_TYPE_VALUE]);
+    m[CUSTOM_TYPE_VALUE] = 0;
+  }
+  return ENC_SYM_TRUE;
 }
 
 static lbm_value ext_sdl_create_soft_renderer(lbm_value *args, lbm_uint argn) {
@@ -213,6 +233,8 @@ static lbm_value ext_sdl_present(lbm_value *args, lbm_uint argn) {
 
 
 static lbm_value ext_sdl_poll_event(lbm_value *args, lbm_uint argn) {
+  (void) args;
+  (void) argn;
 
   SDL_Event event;
   lbm_value r = lbm_enc_sym(lookup_sdl_event_symbol(0));
@@ -316,6 +338,7 @@ static lbm_value ext_sdl_set_active_renderer(lbm_value *args, lbm_uint argn) {
 
 // hacky
 static void blast_indexed2(uint8_t *dest, int dest_pitch, image_buffer_t *img, color_t *colors) {
+  (void) dest_pitch;
 
   uint8_t *data = img->data;
   uint16_t w    = img->width;
@@ -335,6 +358,8 @@ static void blast_indexed2(uint8_t *dest, int dest_pitch, image_buffer_t *img, c
 }
 
 static void blast_indexed4(uint8_t *dest, int dest_pitch, image_buffer_t *img, color_t *colors) {
+  (void) dest_pitch;
+
   uint8_t *data = img->data;
   uint16_t w    = img->width;
   uint16_t h    = img->height;
@@ -353,6 +378,8 @@ static void blast_indexed4(uint8_t *dest, int dest_pitch, image_buffer_t *img, c
 }
 
 static void blast_indexed16(uint8_t *dest, int dest_pitch,image_buffer_t *img, color_t *colors) {
+  (void) dest_pitch;
+
   uint8_t *data = img->data;
   uint16_t w    = img->width;
   uint16_t h    = img->height;
@@ -371,6 +398,8 @@ static void blast_indexed16(uint8_t *dest, int dest_pitch,image_buffer_t *img, c
 }
 
 static void blast_rgb332(uint8_t *dest, int dest_pitch,image_buffer_t *img) {
+  (void) dest_pitch;
+
   uint8_t *data = img->data;
   uint16_t w    = img->width;
   uint16_t h    = img->height;
@@ -386,12 +415,14 @@ static void blast_rgb332(uint8_t *dest, int dest_pitch,image_buffer_t *img) {
     r = (r == 7) ? 255 : r * 36;
     g = (g == 7) ? 255 : g * 36;
     b = (b == 7) ? 255 : b * 36;
-    uint32_t rgb888 = r << 16 | g << 8| b;
-    w_dest[i] = rgb888;
+    uint32_t c = r << 16 | g << 8| b;
+    w_dest[i] = c;
   }
 }
 
 static void blast_rgb565(uint8_t *dest, int dest_pitch, image_buffer_t *img) {
+  (void) dest_pitch;
+
   uint8_t *data = img->data;
   uint16_t w    = img->width;
   uint16_t h    = img->height;
@@ -403,12 +434,14 @@ static void blast_rgb565(uint8_t *dest, int dest_pitch, image_buffer_t *img) {
     uint32_t r = (uint32_t)(pix >> 11);
     uint32_t g = (uint32_t)((pix >> 5) & 0x3F);
     uint32_t b = (uint32_t)(pix & 0x1F);
-    uint32_t rgb888 = r << (16 + 3) | g << (8 + 2) | b << 3;
-    w_dest[i] = rgb888;
+    uint32_t c = r << (16 + 3) | g << (8 + 2) | b << 3;
+    w_dest[i] = c;
   }
 }
 
 static void blast_rgb888(uint8_t *dest, int dest_pitch, image_buffer_t *img) {
+  (void) dest_pitch;
+
   uint8_t *data = img->data;
   uint16_t w    = img->width;
   uint16_t h    = img->height;
@@ -420,8 +453,8 @@ static void blast_rgb888(uint8_t *dest, int dest_pitch, image_buffer_t *img) {
     uint32_t g = data[3 * i + 1];
     uint32_t b = data[3 * i + 2];
 
-    uint32_t rgb888 = r << 16 | g << 8 | b;
-    w_dest[i] = rgb888;
+    uint32_t c = r << 16 | g << 8 | b;
+    w_dest[i] = c;
   }
 }
 
@@ -478,6 +511,7 @@ bool sdl_render_image(image_buffer_t *img, uint16_t x, uint16_t y, color_t *colo
 
 
 void sdl_clear(uint32_t color) {
+  (void) color;
   if (active_rend) {
     SDL_RenderClear(active_rend);
     SDL_RenderPresent(active_rend);
@@ -497,7 +531,9 @@ bool lbm_sdl_init(void) {
 
   lbm_add_extension("sdl-init", ext_sdl_init);
   lbm_add_extension("sdl-create-window",ext_sdl_create_window);
+  lbm_add_extension("sdl-destroy-window", ext_sdl_destroy_window);
   lbm_add_extension("sdl-create-soft-renderer", ext_sdl_create_soft_renderer);
+  lbm_add_extension("sdl-destroy-renderer", ext_sdl_destroy_renderer);
   lbm_add_extension("sdl-renderer-set-color", ext_sdl_renderer_set_color);
   lbm_add_extension("sdl-draw-point", ext_sdl_draw_point);
   lbm_add_extension("sdl-draw-line", ext_sdl_draw_line);

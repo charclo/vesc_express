@@ -77,6 +77,16 @@ bool lbm_image_save_extensions(void);
 bool lbm_image_save_constant_heap_ix(void);
 
 /**
+ * Get the const_heap_index as it is set in the image handling.
+ * This value can be used to determine image "health" upon startup.
+ * an image where the haep_index is not stored correctly is corrupt
+ * and should be cleared! The const heap index should point to a clear
+ * word in flash.
+ * \return index into const heap.
+ */
+lbm_uint lbm_image_const_heap_index(void);
+
+/**
  * Add a symbol to the image.
  * Symbols added to the image are restored upon image-boot.
  * \param name Symbol name.
@@ -85,6 +95,13 @@ bool lbm_image_save_constant_heap_ix(void);
  * \return pointer to head of symbol list.
  */
 lbm_uint *lbm_image_add_symbol(char *name, lbm_uint id, lbm_uint symlist);
+
+/**
+ * Add a symbol name to the image.
+ * \param name Symbol name string
+ * \return pointer to address within image where there name is stored.
+ */
+char *lbm_image_add_symbol_name(const char *name, size_t len);
 
 /**
  * Add a symbol to the image and "link" it to a C address (variable).

@@ -10,8 +10,8 @@
 (defun leading-zeroes (n)
   (if (< n 10) (str-merge "000" (to-str n))
     (if (< n 100) (str-merge "00" (to-str n))
-      (if < n 1000) (str-merge "0" (to-str n))
-      ( to-str n))))
+      (if (< n 1000) (str-merge "0" (to-str n))
+        (to-str n)))))
 
 
 (defun gif-frame (n) 
@@ -52,8 +52,8 @@
            (str-merge "(loopwhile " (pretty nil (+ n 11) cnd) (pretty-aligned-on-top (+ n 11) (list body)) ")"))
          ( (disp-render-mac (? i) (? x) (? y) (? color))
            (str-merge "(disp-render " (pretty nil (+ n 13) i) " " (pretty nil (+ n 13) x) " " (pretty nil (+ n 13) y) " " (pretty nil (+ n 13) color) ")"))
-         ( (fopen (? f) (? m))
-           (str-merge "(fopen \"" f "\" \"" m "\")"))
+         ( (f-open (? f) (? m))
+           (str-merge "(f-open \"" f "\" \"" m "\")"))
          ( (import (? txt) (? sym))
            (str-merge "(import \"" txt "\" '" (to-str (eval sym)) ")"))
          ( (loop (? e) . (? es))
@@ -554,7 +554,7 @@
                           ))
          ( (table (? h) (? d))
            (render-table rend h d))
-         ( _ (render rend ss))
+         ( _ (render rend ss)) ;; Not it is not a call to render-it
          ))
 
 
@@ -566,6 +566,7 @@
            (render-it rend x)
            (render rend xs)
            })
+         ( (? x) (print "RENDER ERROR: " x))
          ))
 
 (define end nil)
@@ -703,11 +704,11 @@
   (let ( (dot-str (to-dot code))
          (name-dot (str-merge "./images/" filename ".dot"))
          (name-png (str-merge "./images/" filename ".png"))
-         (fp-dot (fopen name-dot "w"))
-         (fp-png (fopen name-png "w"))
+         (fp-dot (f-open name-dot "w"))
+         (fp-png (f-open name-png "w"))
          )
     {
-    (fwrite fp-dot dot-str)
+    (f-write fp-dot dot-str)
     (unsafe-call-system (str-merge "dot " name-dot " -Tpng > " name-png))
     }
     ))

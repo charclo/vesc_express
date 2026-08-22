@@ -67,7 +67,6 @@ ifeq ($(PLATFORM), macos-arm64)
 endif
 
 SOURCE_DIR = src
-INCLUDE_DIR = -I./include -I./include/extensions
 EXTENSIONS = src/extensions
 
 $(shell mkdir -p ${BUILD_DIR})
@@ -77,10 +76,18 @@ $(shell mkdir -p ${BUILD_DIR}/extensions)
 SRC = src
 OBJ = obj
 
-SOURCES = $(wildcard $(SOURCE_DIR)/*.c)
-SOURCES += $(wildcard $(EXTENSIONS)/*.c)
-OBJECTS = $(patsubst $(SOURCE_DIR)/%.c, $(BUILD_DIR)/%.o, $(SOURCES))
+LISPBM := ./
 
+include $(LISPBM)/lispbm.mk
+
+#SOURCES = $(wildcard $(SOURCE_DIR)/*.c)
+#SOURCES += $(wildcard $(EXTENSIONS)/*.c)
+SOURCES = $(LISPBM_SRC)
+OBJECTS = $(patsubst $(LISPBM)/src/%.c, $(BUILD_DIR)/%.o, $(SOURCES))
+#OBJECTS = $(patsubst $(SOURCE_DIR)/%.c, $(BUILD_DIR)/%.o, $(SOURCES))
+
+#$(shell echo ${SOURCES})
+#$(shell echo ${OBJECTS})
 
 
 PLATSRCS = $(wildcard $(PLATFORMSRC)/*.c)
@@ -103,10 +110,10 @@ $(LIB): $(OBJECTS)
 	$(AR) -rcs $@ $(OBJECTS)
 
 $(BUILD_DIR)/%.o: $(SOURCE_DIR)/%.c
-	$(CC) $(INCLUDE_DIR) -I$(PLATFORMINC) $(CCFLAGS) -c $< -o $@
+	$(CC) $(LISPBM_INC) -I$(PLATFORMINC) $(CCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/heap_vis.o: $(SOURCE_DIR)/visual/heap_vis.c
-	$(CC) $(INCLUDE_DIR) -I$(PLAFORMINC) $(CCFLAGS) -c $< -o $@
+	$(CC) $(LISPBM_INC) -I$(PLAFORMINC) $(CCFLAGS) -c $< -o $@
 
 test:
 	cd tests && ./run_tests.sh

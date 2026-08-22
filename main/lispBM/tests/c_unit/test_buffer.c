@@ -1,10 +1,10 @@
-
+#define _GNU_SOURCE 
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
-#include "../../include/buffer.h"
+#include "../../utils/buffer.h"
 
 #define TEST_BUFFER_SIZE 256
 

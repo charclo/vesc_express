@@ -22,6 +22,9 @@
 #include "nmea.h"
 
 #include "esp_vfs_fat.h"
+#ifdef HW_INTERNAL_FS
+#include "esp_spiffs.h"
+#endif
 #include "sdmmc_cmd.h"
 #include "esp_vfs.h"
 #include "buffer.h"
@@ -54,6 +57,9 @@ char *file_basepath = "/sdcard/";
 static sdmmc_host_t m_host = SDSPI_HOST_DEFAULT();
 static sdmmc_card_t *m_card = 0;
 static spi_nand_flash_device_t *nand_flash_device_handle = 0;
+#ifdef HW_INTERNAL_FS
+static bool m_storage_mounted = false;
+#endif
 
 static volatile log_header m_headers[LOG_MAX_FIELDS];
 
@@ -392,6 +398,42 @@ void log_unmount_nand_flash (void) {
 		nand_flash_device_handle = 0;
 	}
 }
+
+#ifdef HW_INTERNAL_FS
+void log_unmount_storage(void) {
+	if (m_storage_mounted) {
+		esp_vfs_spiffs_unregister("storage");
+		m_storage_mounted = false;
+	}
+}
+
+esp_err_t log_mount_storage(void) {
+	log_unmount_storage();
+
+	esp_vfs_spiffs_conf_t conf = {
+		.base_path = "/storage",
+		.partition_label = "storage",
+		.max_files = 6,
+		.format_if_mount_failed = true
+	};
+
+	esp_err_t ret = esp_vfs_spiffs_register(&conf);
+	if (ret == ESP_OK) {
+		file_basepath = "/storage/";
+		m_storage_mounted = true;
+	}
+
+	return ret;
+}
+
+esp_err_t log_storage_info(size_t *total, size_t *used) {
+	if (!m_storage_mounted) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	return esp_spiffs_info("storage", total, used);
+}
+#endif
 
 bool log_init(void) {
 	for (int i = 0;i < LOG_MAX_FIELDS;i++) {

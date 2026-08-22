@@ -29,6 +29,7 @@
 #include "freertos/semphr.h"
 
 #include "commands.h"
+#include "conf_custom.h"
 #include "datatypes.h"
 #include "conf_general.h"
 #include "comm_can.h"
@@ -69,9 +70,9 @@
 #include "esp_ota_ops.h"
 #include "esp_sleep.h"
 #include "soc/rtc.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
+#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 #include "esp_wifi.h"
+#endif
 
 // Settings
 #define PRINT_BUFFER_SIZE	400
@@ -90,6 +91,7 @@ static esp_ota_handle_t update_handle = 0;
 static send_func_t send_func = 0;
 static send_func_t send_func_can_fwd = 0;
 static send_func_t send_func_blocking = 0;
+static void(* volatile appdata_func)(unsigned char *data, unsigned int len) = 0;
 
 // Blocking thread
 static SemaphoreHandle_t block_sem;
@@ -203,7 +205,11 @@ static void block_task(void *arg) {
 void commands_init(void) {
 	print_mutex = xSemaphoreCreateMutex();
 	block_sem = xSemaphoreCreateBinary();
+	#if CONFIG_IDF_TARGET_ESP32P4
+	xTaskCreatePinnedToCore(block_task, "comm_block", 4096, NULL, 7, NULL, tskNO_AFFINITY);
+	#else
 	xTaskCreatePinnedToCore(block_task, "comm_block", 2500, NULL, 7, NULL, tskNO_AFFINITY);
+	#endif
 	init_done = true;
 }
 
@@ -253,10 +259,18 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 		send_buffer[ind++] = FW_TEST_VERSION_NUMBER;
 
 		send_buffer[ind++] = HW_TYPE_CUSTOM_MODULE;
-		send_buffer[ind++] = 1; // One custom config
+		send_buffer[ind++] = 1 + conf_custom_cfg_num();
 
 		send_buffer[ind++] = 0; // No phase filters
+#ifdef QMLUI_HEADER_HW
+#ifdef QMLUI_HW_FULLSCREEN
+		send_buffer[ind++] = 2; // Has HW QML (fullscreen)
+#else
+		send_buffer[ind++] = 1; // Has HW QML
+#endif
+#else
 		send_buffer[ind++] = 0; // No HW QML
+#endif
 
 		if (flash_helper_code_size(CODE_IND_QML) > 0) {
 			send_buffer[ind++] = flash_helper_code_flags(CODE_IND_QML);
@@ -287,7 +301,9 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 					comm_wifi_disconnect();
 					vTaskDelay(50 / portTICK_PERIOD_MS);
 
+					#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 					esp_wifi_stop();
+					#endif
 
 					// Here we must use esp_restart even though that does not play nicely
 					// with USB. That is because we skip image validation in the bootloader
@@ -350,7 +366,9 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 
 	case COMM_REBOOT: {
 		comm_wifi_disconnect();
+		#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 		esp_wifi_stop();
+		#endif
 
 		// Deep sleep to reboot as that disconnects USB properly
 //		esp_restart();
@@ -382,6 +400,8 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 		int conf_ind = data[0];
 
 		if (conf_ind != 0) {
+			free(conf);
+			conf_custom_process_cmd(data - 1, len + 1, reply_func);
 			break;
 		}
 
@@ -416,6 +436,12 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 
 		int conf_ind = data[0];
 
+		if (conf_ind != 0) {
+			free(conf);
+			conf_custom_process_cmd(data - 1, len + 1, reply_func);
+			break;
+		}
+
 #ifdef OVR_CONF_DESERIALIZE
 		if (conf_ind == 0 && OVR_CONF_DESERIALIZE(data + 1, conf)) {
 #else
@@ -447,6 +473,7 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 		int conf_ind = data[ind++];
 
 		if (conf_ind != 0) {
+			conf_custom_process_cmd(data - 1, len + 1, reply_func);
 			break;
 		}
 
@@ -779,6 +806,31 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 		break;
 	}
 
+	case COMM_GET_QML_UI_HW: {
+#ifdef QMLUI_HEADER_HW
+		int32_t ind = 0;
+
+		int32_t len_qml = buffer_get_int32(data, &ind);
+		int32_t ofs_qml = buffer_get_int32(data, &ind);
+
+		if (ofs_qml < 0 || len_qml < 0 ||
+				(len_qml + ofs_qml) > (int32_t)data_qml_hw_len ||
+				len_qml > (PACKET_MAX_PL_LEN - 10)) {
+			break;
+		}
+
+		uint8_t *send_buffer_global = mempools_get_packet_buffer();
+		ind = 0;
+		send_buffer_global[ind++] = packet_id;
+		buffer_append_int32(send_buffer_global, data_qml_hw_len, &ind);
+		buffer_append_int32(send_buffer_global, ofs_qml, &ind);
+		memcpy(send_buffer_global + ind, data_qml_hw + ofs_qml, len_qml);
+		ind += len_qml;
+		reply_func(send_buffer_global, ind);
+		mempools_free_packet_buffer(send_buffer_global);
+#endif
+	} break;
+
 	case COMM_GET_QML_UI_APP:
 	case COMM_LISP_READ_CODE: {
 		int32_t ind = 0;
@@ -920,6 +972,9 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 	} break;
 
 	case COMM_CUSTOM_APP_DATA:
+		if (appdata_func) {
+			appdata_func(data, len);
+		}
 		lispif_process_custom_app_data(data, len);
 		break;
 
@@ -1240,4 +1295,9 @@ void commands_send_app_data(unsigned char *data, unsigned int len) {
 	index += len;
 	commands_send_packet(send_buffer_global, index);
 	mempools_free_packet_buffer(send_buffer_global);
+}
+
+bool commands_set_app_data_handler(void(*func)(unsigned char *data, unsigned int len)) {
+	appdata_func = func;
+	return true;
 }

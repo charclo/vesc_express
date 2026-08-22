@@ -26,49 +26,32 @@
 #include "lbm_custom_type.h"
 #include "commands.h"
 #include "utils.h"
-
 #include "display/disp_sh8501b.h"
+#include "display/disp_sh8601.h"
 #include "display/disp_ili9341.h"
 #include "display/disp_ssd1306.h"
 #include "display/disp_st7789.h"
+#include "display/disp_st7789a.h"
 #include "display/disp_ili9488.h"
 #include "display/disp_st7735.h"
 #include "display/disp_ssd1351.h"
 #include "display/disp_icna3306.h"
+#include "display/disp_axs15231.h"
+#include "display/disp_gc9a01.h"
+#include "display/disp_jd9853.h"
+
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "display/disp_st7701.h"
+#include "display/disp_jd9165.h"
+#endif
 
 #include <math.h>
 
 // Display Drivers
 
-static bool gpio_is_valid(int pin) {
-	switch (pin) {
-	case 0:
-	case 1:
-	case 2:
-	case 3:
-	case 4:
-	case 5:
-	case 6:
-	case 7:
-	case 8:
-	case 9:
-	case 10:
-	case 18:
-	case 19:
-	case 20:
-	case 21:
-		return true;
-
-	default:
-		return false;
-	}
-}
-
 
 static char *msg_invalid_gpio = "Invalid GPIO";
 static char *msg_invalid_clk_speed = "Invalid clock speed";
-
-
 static lbm_value ext_disp_load_sh8501b(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(5);
 
@@ -78,10 +61,10 @@ static lbm_value ext_disp_load_sh8501b(lbm_value *args, lbm_uint argn) {
 	gpio_cs = lbm_dec_as_i32(args[2]);
 	gpio_reset = lbm_dec_as_i32(args[3]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -103,6 +86,42 @@ static lbm_value ext_disp_load_sh8501b(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+static lbm_value ext_disp_load_sh8601(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(6);
+
+	int gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc;
+	gpio_sd0 = lbm_dec_as_i32(args[0]);
+	gpio_clk = lbm_dec_as_i32(args[1]);
+	gpio_cs = lbm_dec_as_i32(args[2]);
+	gpio_reset = lbm_dec_as_i32(args[3]);
+	gpio_dc = lbm_dec_as_i32(args[4]);
+
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset) ||
+			!utils_gpio_is_valid(gpio_dc)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	int spi_mhz = lbm_dec_as_i32(args[5]);
+
+	if (spi_mhz == 0 || spi_mhz > 40) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_sh8601_init(gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc, spi_mhz);
+
+	lbm_display_extensions_set_callbacks(
+			disp_sh8601_render_image,
+			disp_sh8601_clear,
+			disp_sh8601_reset);
+
+	return ENC_SYM_TRUE;
+}
+
 static lbm_value ext_disp_load_ili9341(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(6);
 
@@ -113,11 +132,11 @@ static lbm_value ext_disp_load_ili9341(lbm_value *args, lbm_uint argn) {
 	gpio_reset = lbm_dec_as_i32(args[3]);
 	gpio_dc = lbm_dec_as_i32(args[4]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset) ||
-			!gpio_is_valid(gpio_dc)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset) ||
+			!utils_gpio_is_valid(gpio_dc)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -145,8 +164,8 @@ static lbm_value ext_disp_load_ssd1306(lbm_value *args, lbm_uint argn) {
 	int gpio_scl = lbm_dec_as_i32(args[1]);
 	uint32_t clk_speed = lbm_dec_as_u32(args[2]);
 
-	if (!gpio_is_valid(gpio_sda) ||
-			!gpio_is_valid(gpio_scl)) {
+	if (!utils_gpio_is_valid(gpio_sda) ||
+			!utils_gpio_is_valid(gpio_scl)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -174,11 +193,11 @@ static lbm_value ext_disp_load_st7789(lbm_value *args, lbm_uint argn) {
 	int gpio_reset = lbm_dec_as_i32(args[3]);
 	int gpio_dc = lbm_dec_as_i32(args[4]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			(!gpio_is_valid(gpio_reset) && gpio_reset >= 0) ||
-			!gpio_is_valid(gpio_dc)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			(!utils_gpio_is_valid(gpio_reset) && gpio_reset >= 0) ||
+			!utils_gpio_is_valid(gpio_dc)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -200,6 +219,41 @@ static lbm_value ext_disp_load_st7789(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+static lbm_value ext_disp_load_st7789a(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(6);
+
+	int gpio_sd0  = lbm_dec_as_i32(args[0]);
+	int gpio_clk  = lbm_dec_as_i32(args[1]);
+	int gpio_cs   = lbm_dec_as_i32(args[2]);
+	int gpio_reset = lbm_dec_as_i32(args[3]);
+	int gpio_dc   = lbm_dec_as_i32(args[4]);
+
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			(gpio_cs >= 0 && !utils_gpio_is_valid(gpio_cs)) ||
+			(!utils_gpio_is_valid(gpio_reset) && gpio_reset >= 0) ||
+			!utils_gpio_is_valid(gpio_dc)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	uint32_t spi_mhz = lbm_dec_as_u32(args[5]);
+
+	if (spi_mhz == 0 || spi_mhz > 80) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_st7789a_init(gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc, spi_mhz);
+
+	lbm_display_extensions_set_callbacks(
+			disp_st7789a_render_image,
+			disp_st7789a_clear,
+			disp_st7789a_reset);
+
+	return ENC_SYM_TRUE;
+}
+
 static lbm_value ext_disp_load_ili9488(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(6);
 
@@ -210,11 +264,11 @@ static lbm_value ext_disp_load_ili9488(lbm_value *args, lbm_uint argn) {
 	gpio_reset = lbm_dec_as_i32(args[3]);
 	gpio_dc = lbm_dec_as_i32(args[4]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset) ||
-			!gpio_is_valid(gpio_dc)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset) ||
+			!utils_gpio_is_valid(gpio_dc)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -244,11 +298,11 @@ static lbm_value ext_disp_load_st7735(lbm_value *args, lbm_uint argn) {
 	int gpio_reset = lbm_dec_as_i32(args[3]);
 	int gpio_dc = lbm_dec_as_i32(args[4]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset) ||
-			!gpio_is_valid(gpio_dc)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset) ||
+			!utils_gpio_is_valid(gpio_dc)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -278,11 +332,11 @@ static lbm_value ext_disp_load_ssd1351(lbm_value *args, lbm_uint argn) {
 	int gpio_reset = lbm_dec_as_i32(args[3]);
 	int gpio_dc = lbm_dec_as_i32(args[4]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset) ||
-			!gpio_is_valid(gpio_dc)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset) ||
+			!utils_gpio_is_valid(gpio_dc)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -313,10 +367,10 @@ static lbm_value ext_disp_load_icna3306(lbm_value *args, lbm_uint argn) {
 	gpio_cs = lbm_dec_as_i32(args[2]);
 	gpio_reset = lbm_dec_as_i32(args[3]);
 
-	if (!gpio_is_valid(gpio_sd0) ||
-			!gpio_is_valid(gpio_clk) ||
-			!gpio_is_valid(gpio_cs) ||
-			!gpio_is_valid(gpio_reset)) {
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			!utils_gpio_is_valid(gpio_reset)) {
 		lbm_set_error_reason(msg_invalid_gpio);
 		return ENC_SYM_EERROR;
 	}
@@ -338,17 +392,191 @@ static lbm_value ext_disp_load_icna3306(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+static lbm_value ext_disp_load_axs15231(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(8);
+
+	int gpio_sd0 = lbm_dec_as_i32(args[0]);
+	int gpio_sd1 = lbm_dec_as_i32(args[1]);
+	int gpio_sd2 = lbm_dec_as_i32(args[2]);
+	int gpio_sd3 = lbm_dec_as_i32(args[3]);
+	int gpio_clk = lbm_dec_as_i32(args[4]);
+	int gpio_cs = lbm_dec_as_i32(args[5]);
+	int gpio_reset = lbm_dec_as_i32(args[6]);
+
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_sd1) ||
+			!utils_gpio_is_valid(gpio_sd2) ||
+			!utils_gpio_is_valid(gpio_sd3) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			(!utils_gpio_is_valid(gpio_reset) && gpio_reset >= 0)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	uint32_t spi_mhz = lbm_dec_as_u32(args[7]);
+	if (spi_mhz == 0 || spi_mhz > 80) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_axs15231_init(gpio_sd0, gpio_sd1, gpio_sd2, gpio_sd3, gpio_clk, gpio_cs, gpio_reset, spi_mhz);
+
+	lbm_display_extensions_set_callbacks(
+			disp_axs15231_render_image,
+			disp_axs15231_clear,
+			disp_axs15231_reset);
+
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_disp_load_gc9a01(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(6);
+
+	int gpio_sd0 = lbm_dec_as_i32(args[0]);
+	int gpio_clk = lbm_dec_as_i32(args[1]);
+	int gpio_cs = lbm_dec_as_i32(args[2]);
+	int gpio_reset = lbm_dec_as_i32(args[3]);
+	int gpio_dc = lbm_dec_as_i32(args[4]);
+
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			(!utils_gpio_is_valid(gpio_reset) && gpio_reset >= 0) ||
+			!utils_gpio_is_valid(gpio_dc)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	uint32_t spi_mhz = lbm_dec_as_u32(args[5]);
+	if (spi_mhz == 0 || spi_mhz > 40) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_gc9a01_init(gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc, spi_mhz);
+
+	lbm_display_extensions_set_callbacks(
+			disp_gc9a01_render_image,
+			disp_gc9a01_clear,
+			disp_gc9a01_reset);
+
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_disp_load_jd9853(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN_NUMBER(6);
+
+	int gpio_sd0 = lbm_dec_as_i32(args[0]);
+	int gpio_clk = lbm_dec_as_i32(args[1]);
+	int gpio_cs = lbm_dec_as_i32(args[2]);
+	int gpio_reset = lbm_dec_as_i32(args[3]);
+	int gpio_dc = lbm_dec_as_i32(args[4]);
+
+	if (!utils_gpio_is_valid(gpio_sd0) ||
+			!utils_gpio_is_valid(gpio_clk) ||
+			!utils_gpio_is_valid(gpio_cs) ||
+			(!utils_gpio_is_valid(gpio_reset) && gpio_reset >= 0) ||
+			!utils_gpio_is_valid(gpio_dc)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	uint32_t spi_mhz = lbm_dec_as_u32(args[5]);
+	if (spi_mhz == 0 || spi_mhz > 40) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_jd9853_init(gpio_sd0, gpio_clk, gpio_cs, gpio_reset, gpio_dc, spi_mhz);
+
+	lbm_display_extensions_set_callbacks(
+			disp_jd9853_render_image,
+			disp_jd9853_clear,
+			disp_jd9853_reset);
+
+	return ENC_SYM_TRUE;
+}
+#if CONFIG_IDF_TARGET_ESP32P4
+static lbm_value ext_disp_load_jd9165(lbm_value *args, lbm_uint argn) {
+	
+	LBM_CHECK_ARGN_NUMBER(2);
+
+	int pin_rst = lbm_dec_as_i32(args[0]);
+	int lane_mbps = lbm_dec_as_i32(args[1]);
+
+	if (pin_rst >= 0 && !utils_gpio_is_valid(pin_rst)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+
+	if (lane_mbps <= 0) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_jd9165_init(pin_rst, lane_mbps);
+
+	lbm_display_extensions_set_callbacks(
+			disp_jd9165_render_image,
+			disp_jd9165_clear,
+			disp_jd9165_reset);
+
+	return ENC_SYM_TRUE;
+}
+#endif
+
+static lbm_value ext_disp_load_st7701(lbm_value *args, lbm_uint argn) {
+#if CONFIG_IDF_TARGET_ESP32P4
+	LBM_CHECK_ARGN_NUMBER(2);
+
+	int pin_rst = lbm_dec_as_i32(args[0]);
+	int lane_mbps = lbm_dec_as_i32(args[1]);
+
+	if (pin_rst >= 0 && !utils_gpio_is_valid(pin_rst)) {
+		lbm_set_error_reason(msg_invalid_gpio);
+		return ENC_SYM_EERROR;
+	}
+	if (lane_mbps <= 0 || lane_mbps > 4000) {
+		lbm_set_error_reason(msg_invalid_clk_speed);
+		return ENC_SYM_EERROR;
+	}
+
+	disp_st7701_init(pin_rst, lane_mbps);
+	lbm_display_extensions_set_callbacks(
+			disp_st7701_render_image,
+			disp_st7701_clear,
+			disp_st7701_reset);
+	return ENC_SYM_TRUE;
+#else
+	(void)args;
+	(void)argn;
+	lbm_set_error_reason("ST7701 display is only available on ESP32P4");
+	return ENC_SYM_EERROR;
+#endif
+}
+
 void lispif_load_disp_extensions(void) {
 
 	lbm_display_extensions_init();
 
 	lbm_add_extension("disp-load-sh8501b", ext_disp_load_sh8501b);
+	lbm_add_extension("disp-load-sh8601", ext_disp_load_sh8601);
 	lbm_add_extension("disp-load-ili9341", ext_disp_load_ili9341);
 	lbm_add_extension("disp-load-ssd1306", ext_disp_load_ssd1306);
 	lbm_add_extension("disp-load-st7789", ext_disp_load_st7789);
+	lbm_add_extension("disp-load-st7789a", ext_disp_load_st7789a);
 	lbm_add_extension("disp-load-ili9488", ext_disp_load_ili9488);
 	lbm_add_extension("disp-load-st7735", ext_disp_load_st7735);
 	lbm_add_extension("disp-load-ssd1351", ext_disp_load_ssd1351);
 	lbm_add_extension("disp-load-icna3306", ext_disp_load_icna3306);
+	lbm_add_extension("disp-load-axs15231", ext_disp_load_axs15231);
+	lbm_add_extension("disp-load-gc9a01", ext_disp_load_gc9a01);
+	lbm_add_extension("disp-load-jd9853", ext_disp_load_jd9853);
+
+	#if CONFIG_IDF_TARGET_ESP32P4
+	lbm_add_extension("disp-load-st7701", ext_disp_load_st7701);
+	lbm_add_extension("disp-load-jd9165", ext_disp_load_jd9165);
+	#endif
 }
 

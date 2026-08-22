@@ -12,6 +12,7 @@ set(COMPONENT_SRCS
 "packet.c"
 "crc.c"
 "commands.c"
+"conf_custom.c"
 "terminal.c"
 "mempools.c"
 "log.c"
@@ -29,6 +30,7 @@ set(COMPONENT_SRCS
 "hwconf/hw.c"
 
 "lispif.c"
+"lispif_c_lib.c"
 "lispif_events.c"
 "lbm_vesc_utils.c"
 "lispif_vesc_extensions.c"
@@ -62,23 +64,33 @@ set(COMPONENT_SRCS
 "lispBM/src/extensions/lbm_dyn_lib.c"
 "lispBM/src/extensions/ttf_extensions.c"
 "lispBM/src/extensions/schrift.c"
+"lispBM/src/extensions/ttf_backend.c"
 
 "wifi/lispif_wifi_extensions.c"
 
 "ble/custom_ble.c"
-"ble/lispif_ble_extensions.c"
 
 "rgbled/lispif_rgbled_extensions.c"
+
+"touch/lispif_touch_extensions.c"
+"touch/touch_cst836u.c"
 
 "display/lispif_disp_extensions.c"
 "display/disp_sh8501b.c"
 "display/disp_ili9341.c"
 "display/disp_ssd1306.c"
 "display/disp_st7789.c"
+"display/disp_st7789a.c"
 "display/disp_ili9488.c"
 "display/disp_st7735.c"
 "display/disp_ssd1351.c"
 "display/disp_icna3306.c"
+"display/disp_sh8601.c"
+"display/disp_axs15231.c"
+"display/disp_gc9a01.c"
+"display/disp_jd9853.c"
+"display/disp_jd9165.c"
+"display/disp_st7701.c"
 
 "drivers/bme280/bme280.c"
 "drivers/bme280/bme280_if.c"
@@ -91,6 +103,12 @@ set(COMPONENT_SRCS
 
 "lowzip/lowzip.c"
 )
+
+if(CONFIG_BT_BLUEDROID_ENABLED)
+    list(APPEND COMPONENT_SRCS
+        "ble/lispif_ble_extensions.c"
+    )
+endif()
 
 set(COMPONENT_ADD_INCLUDEDIRS
 "."
@@ -108,6 +126,11 @@ set(COMPONENT_ADD_INCLUDEDIRS
 "hwconf/vesc/nanolog"
 "hwconf/vesc/vbms16"
 "hwconf/vesc/rmcore"
+"hwconf/vesc/dash16"
+"hwconf/vesc/wcore"
+"hwconf/rescue"
+"hwconf/avaspark"
+"hwconf/vesc/vbms_inf_sat"
 
 "lispBM"
 "lispBM/include"
@@ -116,6 +139,7 @@ set(COMPONENT_ADD_INCLUDEDIRS
 "wifi"
 "ble"
 "rgbled"
+"touch"
 "drivers"
 "drivers/bme280"
 "drivers/imu"

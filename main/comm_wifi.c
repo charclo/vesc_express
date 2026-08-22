@@ -32,6 +32,8 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "esp_system.h"
+
+#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
@@ -42,9 +44,22 @@
 #include "lwip/sys.h"
 #include "lwip/api.h"
 #include "lwip/netdb.h"
+#endif
+
+#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 
 #define WIFI_CONNECTED_BIT		BIT0
 #define WIFI_FAIL_BIT			BIT1
+
+#if CONFIG_IDF_TARGET_ESP32S3
+	#define UDP_MULTICAST_TASK_STACK_SIZE 2028
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6
+	#define UDP_MULTICAST_TASK_STACK_SIZE 1024
+#elif CONFIG_IDF_TARGET_ESP32P4
+	#define UDP_MULTICAST_TASK_STACK_SIZE 2028
+#else
+	#error "Unsupported target"
+#endif
 
 static EventGroupHandle_t s_wifi_event_group;
 static esp_ip4_addr_t ip = {0};
@@ -554,7 +569,7 @@ void comm_wifi_init(void) {
 		xTaskCreatePinnedToCore(tcp_task_hub, "tcp_hub", 3500, NULL, 8, NULL, tskNO_AFFINITY);
 	}
 
-	xTaskCreatePinnedToCore(broadcast_task, "udp_multicast", 1024, NULL, 8, NULL, tskNO_AFFINITY);
+	xTaskCreatePinnedToCore(broadcast_task, "udp_multicast", UDP_MULTICAST_TASK_STACK_SIZE, NULL, 8, NULL, tskNO_AFFINITY);
 }
 
 WIFI_MODE comm_wifi_get_mode(void) {
@@ -729,7 +744,7 @@ void comm_wifi_set_event_listener(comm_wifi_event_cb_t handler) {
 struct sockaddr_in create_sockaddr_in(ip_addr_t addr, uint16_t port) {
 	struct sockaddr_in result = {0};
 	// *Pretty* sure this works
-	memcpy(&result.sin_addr, &addr, sizeof(ip_addr_t));
+	result.sin_addr.s_addr = ip_2_ip4(&addr)->addr;
 	result.sin_family = AF_INET;
 	result.sin_port   = htons(port);
 	// TODO: Is this necessary and correct if so?
@@ -737,3 +752,93 @@ struct sockaddr_in create_sockaddr_in(ip_addr_t addr, uint16_t port) {
 
 	return result;
 }
+
+#else
+
+void comm_wifi_init(void) {}
+
+WIFI_MODE comm_wifi_get_mode(void) {
+	return WIFI_MODE_DISABLED;
+}
+
+esp_ip4_addr_t comm_wifi_get_ip(void) {
+	return (esp_ip4_addr_t){0};
+}
+
+esp_ip4_addr_t comm_wifi_get_ip_client(void) {
+	return (esp_ip4_addr_t){0};
+}
+
+bool comm_wifi_is_client_connected(void) {
+	return false;
+}
+
+bool comm_wifi_is_connected_hub(void) {
+	return false;
+}
+
+bool comm_wifi_is_connecting(void) {
+	return false;
+}
+
+bool comm_wifi_is_connected(void) {
+	return false;
+}
+
+void comm_wifi_disconnect(void) {}
+
+bool comm_wifi_change_network(const char *ssid, const char *password) {
+	(void)ssid;
+	(void)password;
+	return false;
+}
+
+bool comm_wifi_reconnect_network(void) {
+	return false;
+}
+
+bool comm_wifi_disconnect_network(void) {
+	return false;
+}
+
+bool comm_wifi_set_auto_reconnect(bool should_reconnect) {
+	(void)should_reconnect;
+	return false;
+}
+
+bool comm_wifi_get_auto_reconnect(void) {
+	return false;
+}
+
+void comm_wifi_set_event_listener(comm_wifi_event_cb_t handler) {
+	(void)handler;
+}
+
+void comm_wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+	(void)arg;
+	(void)event_base;
+	(void)event_id;
+	(void)event_data;
+}
+
+void comm_wifi_send_packet_local(unsigned char *data, unsigned int len) {
+	(void)data;
+	(void)len;
+}
+
+void comm_wifi_send_packet_hub(unsigned char *data, unsigned int len) {
+	(void)data;
+	(void)len;
+}
+
+void comm_wifi_send_raw_local(unsigned char *buffer, unsigned int len) {
+	(void)buffer;
+	(void)len;
+}
+
+void comm_wifi_send_raw_hub(unsigned char *buffer, unsigned int len) {
+	(void)buffer;
+	(void)len;
+}
+
+#endif

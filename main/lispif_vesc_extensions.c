@@ -37,6 +37,7 @@
 #include "extensions/lbm_dyn_lib.h"
 #include "extensions/ttf_extensions.h"
 #include "lispif_disp_extensions.h"
+#include "lispif_touch_extensions.h"
 #include "lispif_wifi_extensions.h"
 #include "lispif_ble_extensions.h"
 #include "lispif_rgbled_extensions.h"
@@ -49,6 +50,7 @@
 #include "mempools.h"
 #include "log.h"
 #include "buffer.h"
+#include "flash_helper.h"
 #include "nvs.h"
 #include "print.h"
 #include "utils.h"
@@ -66,12 +68,17 @@
 #include "comm_ble.h"
 #include "lbm_image.h"
 #include "packet.h"
+#include "bme280_if.h"
 
 #include "esp_netif.h"
+#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 #include "esp_wifi.h"
 #include "esp_mac.h"
+#endif
+#if !CONFIG_IDF_TARGET_ESP32P4
 #include "esp_now.h"
 #include "esp_crc.h"
+#endif
 #include "driver/i2c.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
@@ -80,8 +87,7 @@
 #include "nvs_flash.h"
 #include "esp_sleep.h"
 #include "soc/rtc.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
+#include "esp_private/esp_clk.h"
 #include "esp_partition.h"
 #include "esp_ota_ops.h"
 
@@ -95,6 +101,18 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <string.h>
+
+#if CONFIG_IDF_TARGET_ESP32S3
+	#define LBM_EVENTS_TASK_STACK_SIZE 1280
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32P4
+	#define LBM_EVENTS_TASK_STACK_SIZE 640
+#else
+	#error "Unsupported target"
+#endif
+
+// Declare native lib extension
+lbm_value ext_load_native_lib(lbm_value *args, lbm_uint argn);
+lbm_value ext_unload_native_lib(lbm_value *args, lbm_uint argn);
 
 typedef struct {
 	// BMS
@@ -143,9 +161,11 @@ typedef struct {
 	lbm_uint fw_ver;
 	lbm_uint uuid;
 	lbm_uint hw_type;
+	lbm_uint hw_target;
 	lbm_uint part_running;
 	lbm_uint git_branch;
 	lbm_uint git_hash;
+	lbm_uint cpu_freq;
 
 	// FW Info
 	lbm_uint version;
@@ -278,12 +298,16 @@ static bool compare_symbol(lbm_uint sym, lbm_uint *comp) {
 			lbm_add_symbol_const("uuid", comp);
 		} else if (comp == &syms_vesc.hw_type) {
 			lbm_add_symbol_const("hw-type", comp);
+		} else if (comp == &syms_vesc.hw_target) {
+			lbm_add_symbol_const("hw-target", comp);
 		} else if (comp == &syms_vesc.part_running) {
 			lbm_add_symbol_const("part-running", comp);
 		} else if (comp == &syms_vesc.git_branch) {
 			lbm_add_symbol_const("git-branch", comp);
 		} else if (comp == &syms_vesc.git_hash) {
 			lbm_add_symbol_const("git-hash", comp);
+		} else if (comp == &syms_vesc.cpu_freq) {
+			lbm_add_symbol_const("cpu-freq", comp);
 		}
 
 		else if (comp == &syms_vesc.version) {
@@ -391,10 +415,11 @@ static bool is_symbol_true_false(lbm_value v) {
 
 static lbm_value ext_print(lbm_value *args, lbm_uint argn) {
 	const int str_len = 256;
-	char *print_val_buffer = lbm_malloc_reserve(str_len);
+	char *print_val_buffer = lbm_malloc_reserve(str_len + 1);
 	if (!print_val_buffer) {
 		return ENC_SYM_MERROR;
 	}
+	print_val_buffer[str_len] = '\0';
 
 	for (lbm_uint i = 0; i < argn; i ++) {
 		lbm_print_value(print_val_buffer, str_len, args[i]);
@@ -980,54 +1005,13 @@ static lbm_value ext_recv_data(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
-typedef union {
-	uint32_t as_u32;
-	int32_t as_i32;
-	float as_float;
-} eeprom_var;
-
-#define EEPROM_VARS		256
-
 static bool check_eeprom_addr(int addr) {
 	if (addr < 0 || addr >= EEPROM_VARS) {
-		lbm_set_error_reason("Address must be 0 to 255");
+		lbm_set_error_reason("Address must be 0 to 511");
 		return false;
 	}
 
 	return true;
-}
-
-static bool store_eeprom_var(eeprom_var *v, int address) {
-	if (address < 0 || address >= EEPROM_VARS) {
-		return false;
-	}
-
-	char buf[10];
-	sprintf(buf, "v%d", address);
-
-	nvs_handle_t my_handle;
-	esp_err_t ok_op = nvs_open("lbm", NVS_READWRITE, &my_handle);
-	esp_err_t ok_set = nvs_set_u32(my_handle, buf, v->as_u32);
-	esp_err_t ok_com = nvs_commit(my_handle);
-	nvs_close(my_handle);
-
-	return ok_op == ESP_OK && ok_set == ESP_OK && ok_com == ESP_OK;
-}
-
-static bool read_eeprom_var(eeprom_var *v, int address) {
-	if (address < 0 || address >= EEPROM_VARS) {
-		return false;
-	}
-
-	char buf[10];
-	sprintf(buf, "v%d", address);
-
-	nvs_handle_t my_handle;
-	esp_err_t ok_op = nvs_open("lbm", NVS_READONLY, &my_handle);
-	esp_err_t ok_set = nvs_get_u32(my_handle, buf, &v->as_u32);
-	nvs_close(my_handle);
-
-	return ok_op == ESP_OK && ok_set == ESP_OK;
 }
 
 static lbm_value ext_eeprom_store_f(lbm_value *args, lbm_uint argn) {
@@ -1040,7 +1024,7 @@ static lbm_value ext_eeprom_store_f(lbm_value *args, lbm_uint argn) {
 
 	eeprom_var v;
 	v.as_float = lbm_dec_as_float(args[1]);
-	return store_eeprom_var(&v, addr) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	return store_eeprom_var(&v, addr, 1) ? ENC_SYM_TRUE : ENC_SYM_NIL;
 }
 
 static lbm_value ext_eeprom_read_f(lbm_value *args, lbm_uint argn) {
@@ -1052,7 +1036,7 @@ static lbm_value ext_eeprom_read_f(lbm_value *args, lbm_uint argn) {
 	}
 
 	eeprom_var v;
-	bool res = read_eeprom_var(&v, addr);
+	bool res = read_eeprom_var(&v, addr, 1);
 	return res ? lbm_enc_float(v.as_float) : ENC_SYM_NIL;
 }
 
@@ -1066,7 +1050,7 @@ static lbm_value ext_eeprom_store_i(lbm_value *args, lbm_uint argn) {
 
 	eeprom_var v;
 	v.as_i32 = lbm_dec_as_i32(args[1]);
-	return store_eeprom_var(&v, addr) ? ENC_SYM_TRUE : ENC_SYM_NIL;
+	return store_eeprom_var(&v, addr, 1) ? ENC_SYM_TRUE : ENC_SYM_NIL;
 }
 
 static lbm_value ext_eeprom_read_i(lbm_value *args, lbm_uint argn) {
@@ -1078,7 +1062,7 @@ static lbm_value ext_eeprom_read_i(lbm_value *args, lbm_uint argn) {
 	}
 
 	eeprom_var v;
-	bool res = read_eeprom_var(&v, addr);
+	bool res = read_eeprom_var(&v, addr, 1);
 	return res ? lbm_enc_i32(v.as_i32) : ENC_SYM_NIL;
 }
 
@@ -1090,20 +1074,7 @@ static lbm_value ext_eeprom_erase(lbm_value *args, lbm_uint argn){
 		return ENC_SYM_EERROR;
 	}
 
-	char key[10];
-	sprintf(key, "v%d", addr);
-
-	nvs_handle_t nvs_handle;
-	esp_err_t ok_op = nvs_open("lbm", NVS_READWRITE, &nvs_handle);
-	if (ok_op != ESP_OK) {
-		return ENC_SYM_EERROR;
-	}
-
-	esp_err_t ok_set = nvs_erase_key(nvs_handle, key);
-	esp_err_t ok_com = nvs_commit(nvs_handle);
-	nvs_close(nvs_handle);
-
-	if (ok_set != ESP_OK || ok_com != ESP_OK) {
+	if (!erase_eeprom_var(addr, 1)) {
 		return ENC_SYM_EERROR;
 	}
 	return ENC_SYM_TRUE;
@@ -1141,6 +1112,18 @@ static lbm_value ext_sysinfo(lbm_value *args, lbm_uint argn) {
 		res = lbm_cons(lbm_enc_i(FW_VERSION_MAJOR), res);
 	} else if (compare_symbol(name, &syms_vesc.hw_type)) {
 		res = lbm_enc_sym(sym_hw_express);
+	} else if (compare_symbol(name, &syms_vesc.hw_target)) {
+		// Chip this firmware runs on, e.g. "esp32c3". Native libs only run
+		// on the chip they were built for, so multi-target packages use
+		// this to pick the right binary.
+		lbm_value lbm_res;
+		if (lbm_create_array(&lbm_res, strlen(CONFIG_IDF_TARGET) + 1)) {
+			lbm_array_header_t *arr = (lbm_array_header_t*)lbm_car(lbm_res);
+			strcpy((char*)arr->data, CONFIG_IDF_TARGET);
+			res = lbm_res;
+		} else {
+			res = ENC_SYM_MERROR;
+		}
 	} else if (compare_symbol(name, &syms_vesc.part_running)) {
 		const esp_partition_t *running = esp_ota_get_running_partition();
 		if (running != NULL) {
@@ -1171,6 +1154,8 @@ static lbm_value ext_sysinfo(lbm_value *args, lbm_uint argn) {
 		} else {
 			res = ENC_SYM_MERROR;
 		}
+	} else if (compare_symbol(name, &syms_vesc.cpu_freq)) {
+		res = lbm_enc_i(esp_clk_cpu_freq() / 1000000);
 	}
 
 	return res;
@@ -1620,6 +1605,11 @@ static lbm_value ext_can_send_eid(lbm_value *args, lbm_uint argn) {
 static volatile lbm_cid can_recv_sid_cid = -1;
 static volatile lbm_cid can_recv_eid_cid = -1;
 
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+static volatile lbm_cid can2_recv_sid_cid = -1;
+static volatile lbm_cid can2_recv_eid_cid = -1;
+#endif
+
 static lbm_value ext_can_recv_sid(lbm_value *args, lbm_uint argn) {
 	if (argn > 1 || (argn == 1 && !lbm_is_number(args[0]))) {
 		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
@@ -1661,6 +1651,166 @@ static lbm_value ext_can_recv_eid(lbm_value *args, lbm_uint argn) {
 
 	return ENC_SYM_TRUE;
 }
+
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+
+static lbm_value ext_can2_start(lbm_value *args, lbm_uint argn) {
+	if (argn < 2 || argn > 3) {
+		lbm_set_error_reason((char*)lbm_error_str_num_args);
+		return ENC_SYM_TERROR;
+	}
+	LBM_CHECK_NUMBER_ALL();
+
+	int pin_tx  = lbm_dec_as_i32(args[0]);
+	int pin_rx  = lbm_dec_as_i32(args[1]);
+	int baud_kb = (argn >= 3) ? lbm_dec_as_i32(args[2]) : 500;
+
+	if (!utils_gpio_is_valid(pin_tx) || !utils_gpio_is_valid(pin_rx)) {
+		lbm_set_error_reason(string_pin_invalid);
+		return ENC_SYM_EERROR;
+	}
+
+	comm_can2_start(pin_tx, pin_rx, baud_kb);
+	return comm_can2_is_running() ? ENC_SYM_TRUE : ENC_SYM_EERROR;
+}
+
+static lbm_value ext_can2_stop(lbm_value *args, lbm_uint argn) {
+	(void)args; (void)argn;
+	comm_can2_stop();
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_can2_use_vesc(lbm_value *args, lbm_uint argn) {
+	LBM_CHECK_ARGN(1);
+
+	if (!is_symbol_true_false(args[0])) {
+		return ENC_SYM_TERROR;
+	}
+
+	comm_can2_use_vesc_decoder(lbm_is_symbol_true(args[0]));
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_can2_send(lbm_value *args, lbm_uint argn, bool is_eid) {
+	if (argn != 2 || !lbm_is_number(args[0])) {
+		return ENC_SYM_EERROR;
+	}
+
+	lbm_value curr = args[1];
+	uint8_t to_send[8];
+	int ind = 0;
+
+	if (lbm_is_array_r(curr)) {
+		lbm_array_header_t *array = (lbm_array_header_t *)lbm_car(curr);
+		ind = array->size;
+		if (ind > 8) {
+			ind = 0;
+		}
+
+		memcpy(to_send, array->data, ind);
+	} else {
+		while (lbm_is_cons(curr)) {
+			lbm_value arg = lbm_car(curr);
+
+			if (lbm_is_number(arg)) {
+				to_send[ind++] = lbm_dec_as_u32(arg);
+			} else {
+				return ENC_SYM_EERROR;
+			}
+
+			if (ind == 8) {
+				break;
+			}
+
+			curr = lbm_cdr(curr);
+		}
+	}
+
+	if (is_eid) {
+		comm_can2_transmit_eid(lbm_dec_as_u32(args[0]), to_send, ind);
+	} else {
+		comm_can2_transmit_sid(lbm_dec_as_u32(args[0]), to_send, ind);
+	}
+
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_can2_send_sid(lbm_value *args, lbm_uint argn) {
+	return ext_can2_send(args, argn, false);
+}
+
+static lbm_value ext_can2_send_eid(lbm_value *args, lbm_uint argn) {
+	return ext_can2_send(args, argn, true);
+}
+
+static lbm_value ext_can2_send_buffer(lbm_value *args, lbm_uint argn) {
+	if (argn < 2 || argn > 3 || !lbm_is_number(args[0])) {
+		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+		return ENC_SYM_EERROR;
+	}
+
+	int id = lbm_dec_as_i32(args[0]);
+	if (id < 0 || id > 255) return ENC_SYM_EERROR;
+
+	if (!lbm_is_array_r(args[1])) {
+		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+		return ENC_SYM_EERROR;
+	}
+
+	uint8_t send_type = 2;
+	if (argn >= 3 && lbm_is_number(args[2])) {
+		send_type = (uint8_t)lbm_dec_as_u32(args[2]);
+		if (send_type > 3) return ENC_SYM_EERROR;
+	}
+
+	lbm_array_header_t *arr = (lbm_array_header_t *)lbm_car(args[1]);
+	if (arr->size > 500) return ENC_SYM_EERROR;
+
+	comm_can2_send_buffer((uint8_t)id, (uint8_t *)arr->data, arr->size, send_type);
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_can2_recv_sid(lbm_value *args, lbm_uint argn) {
+	if (argn > 1 || (argn == 1 && !lbm_is_number(args[0]))) {
+		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+		return ENC_SYM_EERROR;
+	}
+
+	float timeout = -1.0f;
+	if (argn == 1) timeout = lbm_dec_as_float(args[0]);
+
+	can2_recv_sid_cid = lbm_get_current_cid();
+
+	if (timeout > 0.0f) {
+		lbm_block_ctx_from_extension_timeout(timeout);
+	} else {
+		lbm_block_ctx_from_extension();
+	}
+
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_can2_recv_eid(lbm_value *args, lbm_uint argn) {
+	if (argn > 1 || (argn == 1 && !lbm_is_number(args[0]))) {
+		lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+		return ENC_SYM_EERROR;
+	}
+
+	float timeout = -1.0f;
+	if (argn == 1) timeout = lbm_dec_as_float(args[0]);
+
+	can2_recv_eid_cid = lbm_get_current_cid();
+
+	if (timeout > 0.0f) {
+		lbm_block_ctx_from_extension_timeout(timeout);
+	} else {
+		lbm_block_ctx_from_extension();
+	}
+
+	return ENC_SYM_TRUE;
+}
+
+#endif /* CONFIG_IDF_TARGET_ESP32C6 */
 
 static lbm_value ext_can_current(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_NUMBER_ALL();
@@ -1920,6 +2070,10 @@ static lbm_value ext_enable_event(lbm_value *args, lbm_uint argn) {
 		event_can_sid_en = en;
 	} else if (name == sym_event_can_eid) {
 		event_can_eid_en = en;
+	} else if (name == sym_event_can2_sid) {
+		event_can2_sid_en = en;
+	} else if (name == sym_event_can2_eid) {
+		event_can2_eid_en = en;
 	} else if (name == sym_event_data_rx) {
 		event_data_rx_en = en;
 	} else if (name == sym_event_esp_now_rx) {
@@ -1930,6 +2084,8 @@ static lbm_value ext_enable_event(lbm_value *args, lbm_uint argn) {
 		event_wifi_disconnect_en = en;
 	} else if (name == sym_event_cmds_data_tx) {
 		event_cmds_data_tx_en = en;
+	} else if (name == sym_event_touch_int) {
+		event_touch_int_en = en;
 	} else if (name == sym_bms_chg_allow) {
 		event_bms_chg_allow_en = en;
 	} else if (name == sym_bms_bal_ovr) {
@@ -2106,6 +2262,8 @@ static lbm_value ext_ioboard_set_pwm(lbm_value *args, lbm_uint argn) {
 
 // ESP NOW
 
+#if !CONFIG_IDF_TARGET_ESP32P4
+
 static bool esp_now_initialized = false;
 static volatile lbm_cid esp_now_send_cid = -1;
 static volatile lbm_cid esp_now_recv_cid = -1;
@@ -2280,12 +2438,12 @@ static lbm_value ext_esp_now_add_peer(lbm_value *args, lbm_uint argn) {
 
 	int rate = -1;
 	if (argn >= 2) {
-		if (!lbm_is_number(args[1]) || lbm_dec_as_i32(args[2]) > 15) {
+		if (!lbm_is_number(args[1]) || lbm_dec_as_i32(args[1]) > 15) {
 			lbm_set_error_reason(lbm_error_str_incorrect_arg);
 			return ENC_SYM_TERROR;
 		}
 
-		rate = lbm_dec_as_i32(args[2]);
+		rate = lbm_dec_as_i32(args[1]);
 	}
 
 	uint8_t addr[ESP_NOW_ETH_ALEN] = {255, 255, 255, 255, 255, 255};
@@ -2559,6 +2717,8 @@ static lbm_value ext_esp_now_recv(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+#endif
+
 static bool i2c_started = false;
 static SemaphoreHandle_t i2c_mutex;
 static bool i2c_mutex_init_done = false;
@@ -2618,9 +2778,13 @@ static lbm_value ext_i2c_start(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
-static esp_err_t i2c_tx_rx(uint8_t addr,
+esp_err_t lispif_i2c_tx_rx(uint8_t addr,
 		const uint8_t* write_buffer, size_t write_size,
 		uint8_t* read_buffer, size_t read_size) {
+
+	if (!i2c_mutex_init_done || !i2c_started) {
+		return ESP_ERR_INVALID_STATE;
+	}
 
 	xSemaphoreTake(i2c_mutex, portMAX_DELAY);
 	esp_err_t res;
@@ -2699,7 +2863,7 @@ static lbm_value ext_i2c_tx_rx(lbm_value *args, lbm_uint argn) {
 		rxlen = array->size;
 	}
 
-	esp_err_t res = i2c_tx_rx(addr, txbuf, txlen, rxbuf, rxlen);
+	esp_err_t res = lispif_i2c_tx_rx(addr, txbuf, txlen, rxbuf, rxlen);
 
 	if (!is_arr && txbuf) {
 		lbm_free(txbuf);
@@ -2817,11 +2981,15 @@ static lbm_value ext_gpio_hold_deepsleep(lbm_value *args, lbm_uint argn) {
 
 	int state = lbm_dec_as_i32(args[0]);
 
+	#if SOC_GPIO_SUPPORT_HOLD_SINGLE_IO_IN_DSLP
+	(void)state;
+	#else
 	if (state) {
 		gpio_deep_sleep_hold_en();
 	} else {
 		gpio_deep_sleep_hold_dis();
 	}
+	#endif
 
 	return ENC_SYM_TRUE;
 }
@@ -3447,7 +3615,9 @@ static lbm_value ext_set_pos_time(lbm_value *args, lbm_uint argn) {
 static lbm_value ext_sleep_deep(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(1);
 
+	#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 	esp_wifi_stop();
+	#endif
 
 	float sleep_time = lbm_dec_as_float(args[0]);
 	if (sleep_time > 0) {
@@ -3462,7 +3632,9 @@ static lbm_value ext_sleep_deep(lbm_value *args, lbm_uint argn) {
 static lbm_value ext_sleep_light(lbm_value *args, lbm_uint argn) {
 	LBM_CHECK_ARGN_NUMBER(1);
 
+	#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 	esp_wifi_stop();
+	#endif
 
 	float sleep_time = lbm_dec_as_float(args[0]);
 	if (sleep_time > 0) {
@@ -3486,9 +3658,14 @@ static lbm_value ext_sleep_config_wakeup_pin(lbm_value *args, lbm_uint argn) {
 	}
 
 	gpio_set_direction(pin, GPIO_MODE_INPUT);
-	esp_deep_sleep_enable_gpio_wakeup(1 << pin,
-			mode ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW);
-
+#if CONFIG_IDF_TARGET_ESP32S3
+	esp_sleep_enable_ext0_wakeup(pin, mode ? 1 : 0);
+	esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+#elif CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32P4
+	esp_deep_sleep_enable_gpio_wakeup(1 << pin,mode ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW);
+#else
+	#error "Unsupported target"
+#endif
 	return ENC_SYM_TRUE;
 }
 
@@ -3508,6 +3685,82 @@ static lbm_value ext_rtc_data(lbm_value *args, lbm_uint argn) {
 static lbm_value ext_empty(lbm_value *args, lbm_uint argn) {
 	(void)args;(void)argn;
 	return ENC_SYM_TRUE;
+}
+
+// (import "path" 'sym): the path is only used by VESC Tool at upload time
+// to bundle the file into the (name, offset, len) table appended after the
+// program's own source in the CODE_IND_LISP flash region. Looks sym up in
+// that table and shares the matching flash range as a const array.
+static lbm_value ext_import(lbm_value *args, lbm_uint argn) {
+	if (argn != 2 || !lbm_is_array_r(args[0]) || !lbm_is_symbol(args[1])) {
+		return ENC_SYM_TERROR;
+	}
+
+	lbm_uint sym_id = lbm_dec_sym(args[1]);
+	const char *sym_name = lbm_get_name_by_symbol(sym_id);
+	if (!sym_name) {
+		lbm_set_error_reason("import: could not look up the name of the destination symbol");
+		return ENC_SYM_EERROR;
+	}
+
+	const char *code_data = (const char*)flash_helper_code_data_raw(CODE_IND_LISP);
+	int32_t code_len = (int32_t)flash_helper_code_size_raw(CODE_IND_LISP);
+	if (!code_data || code_len <= 8) {
+		lbm_set_error_reason("No program stored to import from");
+		return ENC_SYM_EERROR;
+	}
+	code_data += 8;
+	code_len -= 8;
+
+	int32_t code_chars = (int32_t)strnlen(code_data, (size_t)code_len);
+	if (code_len <= code_chars + 3) {
+		lbm_set_error_reason("No bundled imports found");
+		return ENC_SYM_EERROR;
+	}
+
+	int32_t ind = code_chars + 1;
+	uint16_t num_imports = buffer_get_uint16((uint8_t*)code_data, &ind);
+	if (num_imports == 0 || num_imports >= 500) {
+		lbm_set_error_reason("No bundled imports found");
+		return ENC_SYM_EERROR;
+	}
+
+	for (int i = 0; i < num_imports; i++) {
+		const char *name = code_data + ind;
+		ind += (int32_t)strnlen(name, (size_t)(code_len - ind)) + 1;
+		int32_t offset = buffer_get_int32((uint8_t*)code_data, &ind);
+		int32_t len = buffer_get_int32((uint8_t*)code_data, &ind);
+
+		if (strcmp(name, sym_name) != 0) {
+			continue;
+		}
+
+		if (offset < 0 || len < 0 || (int64_t)offset + len > (int64_t)code_len) {
+			lbm_set_error_reason("Bundled import has an invalid offset/length");
+			return ENC_SYM_EERROR;
+		}
+
+		lbm_value val;
+		if (!lbm_share_array_const(&val, (char*)(code_data + offset), (lbm_uint)len)) {
+			return ENC_SYM_MERROR;
+		}
+
+		lbm_uint ix_key = sym_id & GLOBAL_ENV_MASK;
+		lbm_value *global_env = lbm_get_global_env();
+		lbm_value new_env_entry = lbm_env_set(global_env[ix_key], args[1], val);
+		if (lbm_is_symbol_merror(new_env_entry)) {
+			return ENC_SYM_MERROR;
+		}
+		if (lbm_is_symbol(new_env_entry)) {
+			lbm_set_error_reason("import: could not bind the destination symbol");
+			return ENC_SYM_EERROR;
+		}
+		global_env[ix_key] = new_env_entry;
+		return ENC_SYM_TRUE;
+	}
+
+	lbm_set_error_reason("Symbol not found among bundled imports");
+	return ENC_SYM_EERROR;
 }
 
 // Remote Messages
@@ -3708,11 +3961,51 @@ static lbm_value ext_f_connect_nand(lbm_value *args, lbm_uint argn) {
 	return res ? ENC_SYM_TRUE : ENC_SYM_NIL;
 }
 
+#ifdef HW_INTERNAL_FS
+// (f-connect-storage) -> t or nil
+static lbm_value ext_f_connect_storage(lbm_value *args, lbm_uint argn) {
+	(void)args;
+	LBM_CHECK_ARGN(0);
+
+	esp_err_t res = log_mount_storage();
+
+	if (res == ESP_OK) {
+		return ENC_SYM_TRUE;
+	} else {
+		lbm_set_esp_error_reason(res);
+		return ENC_SYM_EERROR;
+	}
+}
+
+// (f-storage-info) -> (bytes-free bytes-total)
+static lbm_value ext_f_storage_info(lbm_value *args, lbm_uint argn) {
+	(void)args;
+	LBM_CHECK_ARGN(0);
+
+	size_t total = 0;
+	size_t used = 0;
+	esp_err_t res = log_storage_info(&total, &used);
+	if (res != ESP_OK) {
+		lbm_set_esp_error_reason(res);
+		return ENC_SYM_EERROR;
+	}
+
+	lbm_value out = ENC_SYM_NIL;
+	out = lbm_cons(lbm_enc_i((int32_t)total), out);
+	out = lbm_cons(lbm_enc_i((int32_t)(total - used)), out);
+
+	return out;
+}
+#endif
+
 // (f-disconnect) -> t
 static lbm_value ext_f_disconnect(lbm_value *args, lbm_uint argn) {
 	(void)args; (void)argn;
 	log_unmount_card();
 	log_unmount_nand_flash();
+#ifdef HW_INTERNAL_FS
+	log_unmount_storage();
+#endif
 	return ENC_SYM_TRUE;
 }
 
@@ -3941,8 +4234,12 @@ static lbm_value ext_f_rm(lbm_value *args, lbm_uint argn) {
 
 // (f-ls path) -> ((path is-dir) (path is-dir) ...)
 // (f-ls path 'size) -> ((path is-dir size) (path is-dir size) ...)
+// (f-ls path count) -> ((path is-dir ) (path is-dir ) ...)
+// (f-ls path count offset) -> ((path is-dir ) (path is-dir ) ...)
+// (f-ls path count offset 'size) -> ((path is-dir ) (path is-dir ) ...)
+// (f-ls path count 'size) -> ((path is-dir ) (path is-dir ) ...)
 static lbm_value ext_f_ls(lbm_value *args, lbm_uint argn) {
-	LBM_CHECK_ARGN_RANGE(1, 2);
+	LBM_CHECK_ARGN_RANGE(1, 4);
 
 	char *path = dec_str_check(args[0]);
 	if (!path) {
@@ -3951,9 +4248,22 @@ static lbm_value ext_f_ls(lbm_value *args, lbm_uint argn) {
 	}
 
 	bool report_size = false;
-	if (argn  == 2) {
-		if (lbm_is_symbol(args[1]) && lbm_dec_sym(args[1]) == sym_size) {
+	unsigned int count = INT_MAX;
+	unsigned int offset = 0;
+	
+	// Count comes before offset, 'size can appear anywhere after path
+	for (uint i = 1;i < argn;i++) {
+		if (lbm_is_symbol(args[i]) && lbm_dec_sym(args[i]) == sym_size) {
 			report_size = true;
+		} else if (lbm_is_number(args[i])) {
+			if (count == INT_MAX) {
+				count = lbm_dec_as_u32(args[i]);
+			} else {
+				offset = lbm_dec_as_u32(args[i]);
+			}
+		} else {
+			lbm_set_error_reason((char*)lbm_error_str_incorrect_arg);
+			return ENC_SYM_TERROR;
 		}
 	}
 
@@ -3965,9 +4275,19 @@ static lbm_value ext_f_ls(lbm_value *args, lbm_uint argn) {
 
 	bool merror = false;
 	struct dirent *dir;
+	unsigned int cur_offset = 0;
+	unsigned int cur_count = 0;
 	DIR *d = opendir(path_full);
 	if (d) {
 		while ((dir = readdir(d)) != NULL) {
+			if (cur_offset < offset) {
+				cur_offset++;
+				continue;
+			}
+			if (cur_count >= count) {
+				break;
+			}
+			cur_count++;
 			lbm_value current = ENC_SYM_NIL;
 
 			int len_f = strlen(dir->d_name);
@@ -4435,6 +4755,7 @@ static lbm_value lbm_qml_erase(lbm_value *args, lbm_uint argn, COMM_PACKET_ID cm
 		return ENC_SYM_TRUE;
 	}
 }
+
 
 // (fw-erase size optCanId) -> t, nil
 static lbm_value ext_fw_erase(lbm_value *args, lbm_uint argn) {
@@ -5248,7 +5569,11 @@ static lbm_value ext_uart_read(lbm_value *args, lbm_uint argn) {
 	} else {
 		a.unblock = true;
 		lbm_block_ctx_from_extension();
-		xTaskCreatePinnedToCore(uart_rx_task, "Uart Rx", 2048, &a, 7, NULL, tskNO_AFFINITY);
+		if (xTaskCreatePinnedToCore(uart_rx_task, "Uart Rx", 2048,
+		 &a, 7, NULL, tskNO_AFFINITY) != pdPASS) {
+			lbm_undo_block_ctx_from_extension();
+			return lbm_enc_u(0);
+		}
 		return ENC_SYM_TRUE;
 	}
 }
@@ -6410,6 +6735,34 @@ static lbm_value ext_cmds_proc(lbm_value *args, lbm_uint argn) {
 	return ENC_SYM_TRUE;
 }
 
+static lbm_value ext_bme280_start(lbm_value *args, lbm_uint argn) {
+	lbm_value res = ext_i2c_start(args, argn);
+
+	if (res != ENC_SYM_TRUE) {
+		return res;
+	}
+
+	bme280_if_init_with_mutex(i2c_mutex);
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_bme280_stop(lbm_value *args, lbm_uint argn) {
+	bme280_if_stop();
+	return ENC_SYM_TRUE;
+}
+
+static lbm_value ext_bme280_hum(lbm_value *args, lbm_uint argn) {
+	return lbm_enc_float(bme280_if_get_hum());
+}
+
+static lbm_value ext_bme280_temp(lbm_value *args, lbm_uint argn) {
+	return lbm_enc_float(bme280_if_get_temp());
+}
+
+static lbm_value ext_bme280_pres(lbm_value *args, lbm_uint argn) {
+	return lbm_enc_float(bme280_if_get_pres());
+}
+
 static const char* dyn_functions[] = {
 		"(defun uart-read-bytes (buffer n ofs)"
 		"(let ((rd (uart-read buffer n ofs)))"
@@ -6440,6 +6793,7 @@ static bool dynamic_loader(const char *str, const char **code) {
 }
 
 void lispif_load_vesc_extensions(bool main_found) {
+	lispif_stop_lib();
 	if (!i2c_mutex_init_done) {
 		i2c_mutex = xSemaphoreCreateMutex();
 		i2c_mutex_init_done = true;
@@ -6460,7 +6814,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		}
 		xSemaphoreGive(rmsg_mutex);
 
-		xTaskCreatePinnedToCore(event_task, "LBM Events", 640, NULL, 7, NULL, tskNO_AFFINITY);
+		xTaskCreatePinnedToCore(event_task, "LBM Events", LBM_EVENTS_TASK_STACK_SIZE, NULL, 7, NULL, tskNO_AFFINITY);
 		event_task_running = true;
 	}
 
@@ -6490,7 +6844,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("send-data", ext_send_data);
 		lbm_add_extension("recv-data", ext_recv_data);
 		lbm_add_extension("sysinfo", ext_sysinfo);
-		lbm_add_extension("import", ext_empty);
+		lbm_add_extension("import", ext_import);
 		lbm_add_extension("main-init-done", ext_main_init_done);
 		lbm_add_extension("crc16", ext_crc16);
 		lbm_add_extension("crc32", ext_crc32);
@@ -6523,6 +6877,17 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("can-list-devs", ext_can_list_devs);
 		lbm_add_extension("can-local-id", ext_can_local_id);
 		lbm_add_extension("can-update-baud", ext_can_update_baud);
+
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+		lbm_add_extension("can2-start",       ext_can2_start);
+		lbm_add_extension("can2-stop",        ext_can2_stop);
+		lbm_add_extension("can2-use-vesc",    ext_can2_use_vesc);
+		lbm_add_extension("can2-send-sid",    ext_can2_send_sid);
+		lbm_add_extension("can2-send-eid",    ext_can2_send_eid);
+		lbm_add_extension("can2-send-buffer", ext_can2_send_buffer);
+		lbm_add_extension("can2-recv-sid",    ext_can2_recv_sid);
+		lbm_add_extension("can2-recv-eid",    ext_can2_recv_eid);
+#endif
 
 		lbm_add_extension("can-msg-age", ext_can_msg_age);
 		lbm_add_extension("canget-current", ext_can_get_current);
@@ -6585,6 +6950,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("ioboard-set-pwm", ext_ioboard_set_pwm);
 
 		// ESP NOW
+		#if !CONFIG_IDF_TARGET_ESP32P4
 		lbm_add_extension("esp-now-start", ext_esp_now_start);
 		lbm_add_extension("esp-now-add-peer", ext_esp_now_add_peer);
 		lbm_add_extension("esp-now-del-peer", ext_esp_now_del_peer);
@@ -6597,6 +6963,7 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("wifi-set-bw", ext_wifi_set_bw);
 		lbm_add_extension("wifi-start", ext_wifi_start);
 		lbm_add_extension("wifi-stop", ext_wifi_stop);
+		#endif
 
 		// Logging
 		lbm_add_extension("log-start", ext_log_start);
@@ -6622,13 +6989,22 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("sleep-config-wakeup-pin", ext_sleep_config_wakeup_pin);
 		lbm_add_extension("rtc-data", ext_rtc_data);
 
+		// Native libraries
+		lbm_add_extension("load-native-lib", ext_load_native_lib);
+		lbm_add_extension("unload-native-lib", ext_unload_native_lib);
+
 		lispif_load_rgbled_extensions();
 
 		lispif_load_disp_extensions();
+		lispif_load_touch_extensions();
+		#if CONFIG_ESP_WIFI_ENABLED || CONFIG_ESP_WIFI_REMOTE_ENABLED
 		lispif_load_wifi_extensions();
+		#endif
 
 		if (backup.config.ble_mode == BLE_MODE_SCRIPTING) {
+			#if CONFIG_BT_BLUEDROID_ENABLED
 			lispif_load_ble_extensions();
+			#endif
 		}
 
 		// CAN-Messages
@@ -6638,6 +7014,10 @@ void lispif_load_vesc_extensions(bool main_found) {
 		// File System
 		lbm_add_extension("f-connect", ext_f_connect);
 		lbm_add_extension("f-connect-nand", ext_f_connect_nand);
+#ifdef HW_INTERNAL_FS
+		lbm_add_extension("f-connect-storage", ext_f_connect_storage);
+		lbm_add_extension("f-storage-info", ext_f_storage_info);
+#endif
 		lbm_add_extension("f-disconnect", ext_f_disconnect);
 		lbm_add_extension("f-open", ext_f_open);
 		lbm_add_extension("f-close", ext_f_close);
@@ -6733,6 +7113,13 @@ void lispif_load_vesc_extensions(bool main_found) {
 		lbm_add_extension("cmds-start-stop", ext_cmds_start_stop);
 		lbm_add_extension("cmds-proc", ext_cmds_proc);
 
+		// BME280
+		lbm_add_extension("bme280-start", ext_bme280_start);
+		lbm_add_extension("bme280-stop", ext_bme280_stop);
+		lbm_add_extension("bme280-hum", ext_bme280_hum);
+		lbm_add_extension("bme280-temp", ext_bme280_temp);
+		lbm_add_extension("bme280-pres", ext_bme280_pres);
+
 		// Extension libraries
 		lbm_math_extensions_init();
 		lbm_color_extensions_init();
@@ -6756,13 +7143,19 @@ void lispif_disable_all_events(void) {
 		xSemaphoreGive(rmsg_mutex);
 	}
 
+	lispif_stop_lib();
+
 	event_can_sid_en = false;
 	event_can_eid_en = false;
+	event_can2_sid_en = false;
+	event_can2_eid_en = false;
+
 	event_data_rx_en = false;
 	event_esp_now_rx_en = false;
 	event_ble_rx_en = false;
 	event_wifi_disconnect_en = false;
 	event_cmds_data_tx_en = false;
+	event_touch_int_en = false;
 
 	event_bms_chg_allow_en = false;
 	event_bms_bal_ovr_en = false;
@@ -6772,9 +7165,15 @@ void lispif_disable_all_events(void) {
 
 	bms_register_cmd_handler(NULL);
 
+	#if !CONFIG_IDF_TARGET_ESP32P4
 	esp_now_recv_cid = -1;
+	#endif
 	can_recv_sid_cid = -1;
 	can_recv_eid_cid = -1;
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+	can2_recv_sid_cid = -1;
+	can2_recv_eid_cid = -1;
+#endif
 	recv_data_cid = -1;
 
 	for (int i = 0;i < file_now;i++) {
@@ -6795,6 +7194,8 @@ void lispif_disable_all_events(void) {
 
 	cmds_running = false;
 	cmds_state = 0;
+
+	vTaskDelay(pdMS_TO_TICKS(5));
 }
 
 void lispif_process_can(uint32_t can_id, uint8_t *data8, int len, bool is_ext) {
@@ -6843,6 +7244,51 @@ void lispif_process_can(uint32_t can_id, uint8_t *data8, int len, bool is_ext) {
 		}
 	}
 }
+
+#ifdef CONFIG_IDF_TARGET_ESP32C6
+void lispif_process_can2(uint32_t can_id, uint8_t *data8, int len, bool is_ext) {
+	if (is_ext) {
+		if (can2_recv_eid_cid < 0 && !event_can2_eid_en) return;
+	} else {
+		if (can2_recv_sid_cid < 0 && !event_can2_sid_en) return;
+	}
+
+	lbm_flat_value_t v;
+	if (start_flatten_with_gc(&v, 50 + len)) {
+		f_cons(&v);
+
+		if ((can2_recv_sid_cid < 0 && !is_ext) || (can2_recv_eid_cid < 0 && is_ext)) {
+			f_sym(&v, is_ext ? sym_event_can2_eid : sym_event_can2_sid);
+			f_cons(&v);
+			f_i32(&v, can_id);
+			f_lbm_array(&v, len, data8);
+		} else {
+			f_i32(&v, can_id);
+			f_cons(&v);
+			f_lbm_array(&v, len, data8);
+			f_sym(&v, ENC_SYM_NIL);
+		}
+
+		lbm_finish_flatten(&v);
+
+		if (can2_recv_sid_cid >= 0 && !is_ext) {
+			if (!lbm_unblock_ctx(can2_recv_sid_cid, &v)) {
+				lbm_free(v.buf);
+			}
+			can2_recv_sid_cid = -1;
+		} else if (can2_recv_eid_cid >= 0 && is_ext) {
+			if (!lbm_unblock_ctx(can2_recv_eid_cid, &v)) {
+				lbm_free(v.buf);
+			}
+			can2_recv_eid_cid = -1;
+		} else {
+			if (!lbm_event(&v)) {
+				lbm_free(v.buf);
+			}
+		}
+	}
+}
+#endif /* CONFIG_IDF_TARGET_ESP32C6 */
 
 void lispif_process_custom_app_data(unsigned char *data, unsigned int len) {
 	if (!event_data_rx_en && recv_data_cid < 0) {

@@ -27,7 +27,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
 
-#include "esp_bt.h"
+#if CONFIG_BT_BLUEDROID_ENABLED
 #include "esp_bt_defs.h"
 #include "esp_bt_device.h"
 #include "esp_bt_main.h"
@@ -36,11 +36,22 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#if CONFIG_IDF_TARGET_ESP32P4
+#include "eh_host_feat_bt_mcu.h"
+#include "esp_bluedroid_hci.h"
+#include "esp_hosted.h"
+#else
+#include "esp_bt.h"
+#endif
+#endif
 
 #include "packet.h"
 #include "commands.h"
 #include "conf_general.h"
 #include "main.h"
+
+#if CONFIG_BT_BLUEDROID_ENABLED
+
 
 #define GATTS_CHAR_VAL_LEN_MAX 255
 #define DEFAULT_BLE_MTU 20 // 23 for default mtu and 3 bytes for ATT headers
@@ -48,14 +59,72 @@
 #define BLE_SERVICE_HANDLE_NUM (1 + (3 * BLE_CHAR_COUNT))
 #define ADV_CFG_FLAG (1 << 0)
 #define SCAN_RSP_CFG_FLAG (1 << 1)
+#define ESP_PWR_LVL ESP_PWR_LVL_P18
 
 static bool is_connected = false;
 static uint16_t ble_current_mtu = DEFAULT_BLE_MTU;
 
 static uint16_t notify_conn_id = 0;
-static esp_gatt_if_t notify_gatts_if;
+static esp_gatt_if_t notify_gatts_if = ESP_GATT_IF_NONE;
 
 static uint8_t adv_config_done = 0;
+
+#if CONFIG_IDF_TARGET_ESP32P4
+static esp_bluedroid_hci_driver_callbacks_t hosted_hci_callbacks;
+static eh_host_bt_mcu_hci_tx_fn_t hosted_hci_tx;
+
+static void hosted_hci_rx(const uint8_t *data, uint16_t len, void *arg) {
+	(void)arg;
+	if (hosted_hci_callbacks.notify_host_recv) {
+		hosted_hci_callbacks.notify_host_recv((uint8_t *)data, len);
+	}
+}
+
+static void hosted_hci_send(uint8_t *data, uint16_t len) {
+	if (data && len && hosted_hci_tx) {
+		hosted_hci_tx(data, len);
+	}
+}
+
+static bool hosted_hci_can_send(void) {
+	return true;
+}
+
+static esp_err_t hosted_hci_register(
+		const esp_bluedroid_hci_driver_callbacks_t *callbacks) {
+	if (!callbacks) {
+		memset(&hosted_hci_callbacks, 0, sizeof(hosted_hci_callbacks));
+		eh_host_bt_mcu_hci_unregister();
+		hosted_hci_tx = NULL;
+		return ESP_OK;
+	}
+	hosted_hci_callbacks = *callbacks;
+	hosted_hci_tx = eh_host_bt_mcu_hci_register(hosted_hci_rx, NULL);
+	return hosted_hci_tx ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t hosted_ble_init(void) {
+	esp_err_t res = esp_hosted_connect_to_slave();
+	if (res != ESP_OK) {
+		return res;
+	}
+	res = esp_hosted_bt_controller_init();
+	if (res != ESP_OK) {
+		return res;
+	}
+	res = esp_hosted_bt_controller_enable();
+	if (res != ESP_OK) {
+		return res;
+	}
+
+	static const esp_bluedroid_hci_driver_operations_t hosted_hci = {
+		.send = hosted_hci_send,
+		.check_send_available = hosted_hci_can_send,
+		.register_host_callback = hosted_hci_register,
+	};
+	return esp_bluedroid_attach_hci_driver(&hosted_hci);
+}
+#endif
 
 static uint8_t char1_str[GATTS_CHAR_VAL_LEN_MAX] = {0};
 static uint8_t char2_str[GATTS_CHAR_VAL_LEN_MAX] = {0};
@@ -586,20 +655,26 @@ static void gatts_event_handler(
 			}
 
 			gatts_profile.conn_id = param->connect.conn_id;
+			notify_gatts_if = gatts_if;
+			notify_conn_id = param->connect.conn_id;
 			ble_current_mtu = DEFAULT_BLE_MTU; 
 			is_connected = true;
 			LED_BLUE_ON();
 
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL_P18);
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL_P18);
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL2, ESP_PWR_LVL_P18);
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P18);
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P18);
-			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P18);
+#if !CONFIG_IDF_TARGET_ESP32P4
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL);
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL);
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL2, ESP_PWR_LVL);
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL);
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL);
+			esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL);
+#endif
 			break;
 
 		case ESP_GATTS_DISCONNECT_EVT:
 			is_connected = false;
+			notify_gatts_if = ESP_GATT_IF_NONE;
+			notify_conn_id = 0;
 			LED_BLUE_OFF();
 			esp_ble_gap_start_advertising(&ble_adv_params);
 			break;
@@ -620,7 +695,8 @@ static void process_packet(unsigned char *data, unsigned int len) {
 }
 
 static void send_packet_raw(unsigned char *buffer, unsigned int len) {
-	if (!is_connected) {
+	if (!is_connected || notify_gatts_if == ESP_GATT_IF_NONE ||
+			ble_chars[1].char_handle == 0) {
 		return;
 	}
 
@@ -663,19 +739,28 @@ void comm_ble_init(void) {
 		ble_chars[1].desc_perm = (ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
 	}
 
+
+#if CONFIG_IDF_TARGET_ESP32P4
+	if (hosted_ble_init() != ESP_OK) {
+		return;
+	}
+#else
 	esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 	esp_bt_controller_init(&bt_cfg);
-
 	esp_bt_controller_enable(ESP_BT_MODE_BLE);
+#endif
+
 	esp_bluedroid_init();
 	esp_bluedroid_enable();
 
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL_P18);
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL_P18);
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL2, ESP_PWR_LVL_P18);
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P18);
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P18);
-	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P18);
+#if !CONFIG_IDF_TARGET_ESP32P4
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL2, ESP_PWR_LVL);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL);
+	esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL);
+#endif
 
 	esp_bt_dev_set_device_name((char *)backup.config.ble_name);
 
@@ -736,3 +821,22 @@ int comm_ble_mtu_now(void) {
 void comm_ble_send_packet(unsigned char *data, unsigned int len) {
 	packet_send_packet(data, len, packet_state);
 }
+
+#else
+
+void comm_ble_init(void) {}
+
+bool comm_ble_is_connected(void) {
+	return false;
+}
+
+int comm_ble_mtu_now(void) {
+	return 0;
+}
+
+void comm_ble_send_packet(unsigned char *data, unsigned int len) {
+	(void)data;
+	(void)len;
+}
+
+#endif

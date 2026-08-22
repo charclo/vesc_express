@@ -280,6 +280,15 @@
                       ))
               end)))
 
+(define endian
+  (ref-entry "lbm-endian"
+             (list
+              (para (list "`lbm-endian` returns the endianness of the system lbm is running on."
+                          ))
+              (code '((lbm-endian)
+                      ))
+              end)))
+
 (define arch
   (ref-entry "is-64bit"
              (list
@@ -358,8 +367,8 @@
   )
 
 (defun render-manual ()
-  (let ((h (fopen "runtimeref.md" "w"))
-        (r (lambda (s) (fwrite-str h s))))
+  (let ((h (f-open "runtimeref.md" "w"))
+        (r (lambda (s) (f-write-str h s))))
     {
     (gc)
     (var t0 (systime))

@@ -166,12 +166,15 @@ lbm_cid lbm_eval_defined_program(char *symbol) {
 int lbm_send_message(lbm_cid cid, lbm_value msg) {
   int res = 0;
 
+#ifndef LBM_SINGLE_THREADED
   if (lbm_get_eval_state() == EVAL_CPS_STATE_PAUSED) {
-
+#endif
     if (lbm_find_receiver_and_send(cid, msg)) {
       res = 1;
     }
+#ifndef LBM_SINGLE_THREADED
   }
+#endif
   return res;
 }
 
@@ -179,15 +182,24 @@ int lbm_define(char *symbol, lbm_value value) {
   int res = 0;
   if (symbol) {
     lbm_uint sym_id;
+#ifndef LBM_SINGLE_THREADED
     if (lbm_get_eval_state() == EVAL_CPS_STATE_PAUSED) {
+#endif
       if (lbm_get_symbol_by_name(symbol, &sym_id) ||
           lbm_add_symbol_const_base(symbol, &sym_id, false)) {
         lbm_uint ix_key = sym_id & GLOBAL_ENV_MASK;
         lbm_value *glob_env = lbm_get_global_env();
-        glob_env[ix_key] = lbm_env_set(glob_env[ix_key], lbm_enc_sym(sym_id), value);
-        res = 1;
+        lbm_value new_env_entry = lbm_env_set(glob_env[ix_key], lbm_enc_sym(sym_id), value);
+        if (lbm_is_symbol(new_env_entry)) {
+          res = 0;
+        } else {
+          glob_env[ix_key] = new_env_entry;
+          res = 1;
+        }
       }
+#ifndef LBM_SINGLE_THREADED
     }
+#endif
   }
   return res;
 }

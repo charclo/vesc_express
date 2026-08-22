@@ -30,12 +30,18 @@ static float m_last_hum = 0.0;
 static float m_last_pres = 0.0;
 
 static volatile bool mutex_init = false;
+static volatile bool init_done = false;
+static volatile bool stop_now = false;
 static SemaphoreHandle_t i2c_mutex;
 
 // Private functions
 static void bme_task(void *arg);
 
 void bme280_if_init(int pin_sda, int pin_scl) {
+	if (init_done) {
+		return;
+	}
+
 	i2c_config_t conf = {
 			.mode = I2C_MODE_MASTER,
 			.sda_io_num = pin_sda,
@@ -48,13 +54,30 @@ void bme280_if_init(int pin_sda, int pin_scl) {
 	i2c_param_config(0, &conf);
 	i2c_driver_install(0, conf.mode, 0, 0, 0);
 
+	init_done = true;
 	xTaskCreatePinnedToCore(bme_task, "BME280", 1536, NULL, 6, NULL, tskNO_AFFINITY);
 }
 
 void bme280_if_init_with_mutex(SemaphoreHandle_t mutex) {
 	mutex_init = true;
 	i2c_mutex = mutex;
+
+	if (init_done) {
+		return;
+	}
+
+	init_done = true;
 	xTaskCreatePinnedToCore(bme_task, "BME280", 1536, NULL, 6, NULL, tskNO_AFFINITY);
+}
+
+void bme280_if_stop(void) {
+	stop_now = true;
+
+	while (init_done) {
+		vTaskDelay(1);
+	}
+
+	vTaskDelay(1);
 }
 
 float bme280_if_get_hum(void) {
@@ -138,7 +161,8 @@ static void bme_task(void *arg) {
 	bme280_set_sensor_settings(settings_sel, &dev);
 	req_delay = bme280_cal_meas_delay(&dev.settings);
 
-	for(;;) {
+	stop_now = false;
+	while (!stop_now) {
 		bme280_set_sensor_mode(BME280_FORCED_MODE, &dev);
 		vTaskDelay(req_delay / portTICK_PERIOD_MS);
 
@@ -147,4 +171,8 @@ static void bme_task(void *arg) {
 		m_last_temp = comp_data.temperature;
 		m_last_pres = comp_data.pressure;
 	}
+
+	init_done = false;
+
+	vTaskDelete(NULL);
 }
