@@ -58,6 +58,7 @@
 #include "nmea.h"
 #include "lispif.h"
 #include "flash_helper.h"
+#include "auto_sleep.h"
 #include "bms.h"
 #include "imu.h"
 
@@ -218,6 +219,8 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 	if (!len) {
 		return;
 	}
+
+	auto_sleep_feed();
 
 	COMM_PACKET_ID packet_id;
 

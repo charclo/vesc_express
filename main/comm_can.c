@@ -35,6 +35,7 @@
 #include "lispif.h"
 #include "bms.h"
 #include "utils.h"
+#include "auto_sleep.h"
 #include "soc/gpio_sig_map.h"
 #include <string.h>
 
@@ -584,6 +585,8 @@ static void rx_task(void *arg) {
 		esp_err_t res = twai_receive(&rx_message, 2);
 
 		if (res == ESP_OK) {
+			auto_sleep_feed();
+
 			rx_buf[rx_write] = rx_message;
 			rx_write++;
 			if (rx_write >= RXBUF_LEN) {

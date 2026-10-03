@@ -25,6 +25,7 @@ set(COMPONENT_SRCS
 "bms.c"
 "log_comm.c"
 "digital_filter.c"
+"auto_sleep.c"
 
 "config/confsrc.c"
 "hwconf/hw.c"

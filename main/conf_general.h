@@ -39,4 +39,22 @@
 #include "main.h"
 #include "hw.h"
 
+// Automatic deep sleep. Go to deep sleep when there has been no CAN-traffic,
+// received command or open BLE/TCP connection for AUTO_SLEEP_CAN_TIMEOUT
+// seconds. Set to 0 to disable. Can be overridden in the hardware header.
+#ifndef AUTO_SLEEP_CAN_TIMEOUT
+#define AUTO_SLEEP_CAN_TIMEOUT		0
+#endif
+
+// Wake up from automatic deep sleep every this many seconds so that BLE can
+// advertise. Set to 0 to only wake up on CAN-activity.
+#ifndef AUTO_SLEEP_WAKE_INTERVAL
+#define AUTO_SLEEP_WAKE_INTERVAL	60
+#endif
+
+// Seconds to stay awake after a timer wakeup when nothing happens
+#ifndef AUTO_SLEEP_AWAKE_TIME
+#define AUTO_SLEEP_AWAKE_TIME		10
+#endif
+
 #endif /* MAIN_CONF_GENERAL_H_ */

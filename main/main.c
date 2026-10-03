@@ -54,6 +54,7 @@
 #include "mempools.h"
 #include "lispif.h"
 #include "bms.h"
+#include "auto_sleep.h"
 #include "ble/custom_ble.h"
 
 #include <string.h>
@@ -193,6 +194,8 @@ void app_main(void) {
 			"Re-initialize ublox gnss receiver",
 			0,
 			terminal_ublox_reinit);
+
+	auto_sleep_init();
 
 	init_done = true;
 
