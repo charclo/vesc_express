@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "esp_ota_ops.h"
 #include "driver/uart.h"
 
 #include "conf_general.h"
@@ -195,6 +196,10 @@ void app_main(void) {
 			terminal_ublox_reinit);
 
 	init_done = true;
+
+	// Initialization completed without a reset, so mark this app as valid. Until
+	// this is done a reset makes the bootloader roll back to the previous app.
+	esp_ota_mark_app_valid_cancel_rollback();
 
 	// Exit main to free up heap-space
 	vTaskDelete(NULL);
